@@ -355,6 +355,14 @@ public partial class FlowsheetView : UserControl
         // InputReleased fires after InputReleaseCallback has finalized selection and set LastClickedObjectName.
         Canvas.InputReleased += (_, _) =>
         {
+            // In connect mode a click picks the source, then the target, instead of opening an
+            // editor. The surface has already finalized the selection by the time this fires, so
+            // HandleConnectClick reads the clicked object off SelectedObject.
+            if (_connectMode)
+            {
+                HandleConnectClick();
+                return;
+            }
             var name = LastClickedObjectName;
             if (!string.IsNullOrEmpty(name) && _flowsheet != null)
             {
@@ -2082,6 +2090,11 @@ public partial class FlowsheetView : UserControl
         };
 
         // --- Results menu ---
+        MenuResultsReport.Click += (_, _) =>
+        {
+            if (_flowsheet == null) { AppendLog("No simulation loaded."); return; }
+            new ReportConfigWindow(_flowsheet, SimulationName + " - Results Report").Show(HostWindow);
+        };
         MenuMarkdownReport.Click += (_, _) =>
         {
             if (_flowsheet == null) { AppendLog("No simulation loaded."); return; }
@@ -2219,10 +2232,13 @@ public partial class FlowsheetView : UserControl
         var obj = _surface.SelectedObject;
         if (obj == null) return;
 
-        var tag  = obj.Tag;
-        var name = obj.Name;
-        _surface.DeleteSelectedObject(obj);
-        _flowsheet.SimulationObjects.Remove(name);
+        var tag = obj.Tag;
+        // Route deletion through the flowsheet's own logic (the same path the WinForms edition uses).
+        // It disconnects every attached input/output/energy port, removes the connection lines, clears
+        // any spec/adjust/PID references and drops the object from both the simulation-object and
+        // graphic-object dictionaries. The previous surface-only delete left ports occupied and the
+        // connection lines still drawn on the canvas.
+        _flowsheet.DeleteSelectedObject(this, EventArgs.Empty, obj, confirmation: false, triggercalc: false);
         Canvas.Refresh();
         UpdateResultsPanel();
         AppendLog($"Deleted '{tag}'.");
@@ -3097,15 +3113,22 @@ public partial class FlowsheetView : UserControl
 
     private static void OpenUrl(string url)
     {
+        // Use the per-OS opener first; ShellExecute can fail with "no application found" on a machine
+        // whose default browser registration is broken (and pops the shell's own error dialog).
         try
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = url,
-                UseShellExecute = true
-            });
+            if (OperatingSystem.IsWindows())
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + url + "\"") { UseShellExecute = false });
+            else if (OperatingSystem.IsMacOS())
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("open", url) { UseShellExecute = false });
+            else
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("xdg-open", url) { UseShellExecute = false });
         }
-        catch { }
+        catch
+        {
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = url, UseShellExecute = true }); }
+            catch { }
+        }
     }
 
     // -------------------------------------------------------------------------

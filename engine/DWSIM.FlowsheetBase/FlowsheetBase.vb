@@ -304,6 +304,20 @@ Imports DWSIM.ExtensionMethods
         gObj.Name = prefix & "-" & Guid.NewGuid().ToString()
         gObj.Flowsheet = Me
 
+        ' The table and chart graphics declare their own Flowsheet property, which shadows the one on
+        ' GraphicObject: the assignment above reaches the base property only, leaving theirs Nothing, and
+        ' their Draw dereferences it. Assign through the concrete type as well, the way LoadProcessData
+        ' already does for the objects it restores from a file.
+        If TypeOf gObj Is TableGraphic Then
+            DirectCast(gObj, TableGraphic).Flowsheet = Me
+        ElseIf TypeOf gObj Is MasterTableGraphic Then
+            DirectCast(gObj, MasterTableGraphic).Flowsheet = Me
+        ElseIf TypeOf gObj Is SpreadsheetTableGraphic Then
+            DirectCast(gObj, SpreadsheetTableGraphic).Flowsheet = Me
+        ElseIf TypeOf gObj Is Charts.OxyPlotGraphic Then
+            DirectCast(gObj, Charts.OxyPlotGraphic).Flowsheet = Me
+        End If
+
         If tag <> "" Then
             gObj.Tag = tag
         Else
@@ -2216,6 +2230,13 @@ Imports DWSIM.ExtensionMethods
             gObj.Flowsheet = Me
             gObj.PositionConnectors()
             gObj.Owner = SimulationObjects(gObj.Name)
+            'External unit operations are identified by the graphic's description when the
+            'file is loaded back; only Draw() sets it, so a headless save leaves it empty
+            'and the saved connectors cannot be restored.
+            Dim extowner = TryCast(gObj.Owner, Interfaces.IExternalUnitOperation)
+            If extowner IsNot Nothing AndAlso String.IsNullOrEmpty(gObj.Description) Then
+                gObj.Description = extowner.Description
+            End If
             SimulationObjects(gObj.Name).SetFlowsheet(Me)
             FlowsheetSurface.AddObject(gObj)
         End If
@@ -6360,6 +6381,11 @@ Label_00CC:
 
     Public Sub SavePFDScreenshotToPNG(pngfilepath As String) Implements IFlowsheet.SavePFDScreenshotToPNG
 
+        ' UpdateCanvas returns without drawing when the surface has no flowsheet reference, which is
+        ' the case on the headless/automation path (only the graphic objects get one). Set it so the
+        ' screenshot actually renders the objects.
+        FlowsheetSurface.Flowsheet = Me
+
         If Not Settings.AutomationMode Then
             Dim scale = Settings.DpiScale
             Using bmp As New SKBitmap(GetFlowsheetSurfaceWidth() * scale, GetFlowsheetSurfaceHeight() * scale)
@@ -6377,6 +6403,14 @@ Label_00CC:
             Using bmp As New SKBitmap(1920, 1080)
                 Using canvas As New SKCanvas(bmp)
                     canvas.Scale(1.0)
+                    'Headless surfaces never receive their owner (UpdateCanvas draws
+                    'nothing without it) and keep zoom/offset at defaults that can leave
+                    'every object outside the captured area; wire and frame them first.
+                    If FlowsheetSurface.Flowsheet Is Nothing Then FlowsheetSurface.Flowsheet = Me
+                    FlowsheetSurface.ZoomAll(1920, 1080)
+                    'ZoomAll frames the shapes but not their tag labels; back off a little
+                    'so text on the right and bottom edges is not clipped.
+                    FlowsheetSurface.Zoom *= 0.9
                     FlowsheetSurface.UpdateCanvas(canvas)
                     Dim d = SKImage.FromBitmap(bmp).Encode(SKEncodedImageFormat.Png, 100)
                     If File.Exists(pngfilepath) Then File.Delete(pngfilepath)

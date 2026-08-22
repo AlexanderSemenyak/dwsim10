@@ -90,6 +90,12 @@ public sealed class FlowsheetDockFactory : Factory
 
     public override IRootDock CreateLayout()
     {
+        // This is a fixed IDE layout: panels are shown and hidden by proportion from the View menu,
+        // not by floating or pinning. Every tool keeps CanFloat and CanPin off - pinning (auto-hide)
+        // re-hosted the live panel control and left its content blank after re-docking (issue #25), and
+        // floating the assistant WebTool made its whole window vanish (the native WebView host does not
+        // survive the move into a floating window).
+
         // --- Left: Editor ---
         EditorTool = new Tool
         {
@@ -97,7 +103,7 @@ public sealed class FlowsheetDockFactory : Factory
             Title = "Editor",
             Content = _editorContent,
             CanClose = false,
-            CanPin = true,
+            CanPin = false,
             CanFloat = false,
             Proportion = 0.30
         };
@@ -160,7 +166,7 @@ public sealed class FlowsheetDockFactory : Factory
             Title = "Objects",
             Content = _paletteContent,
             CanClose = false,
-            CanPin = true,
+            CanPin = false,
             CanFloat = false,
             Proportion = 0.25
         };
@@ -172,7 +178,7 @@ public sealed class FlowsheetDockFactory : Factory
             Title = "Log",
             Content = _logContent,
             CanClose = false,
-            CanPin = true,
+            CanPin = false,
             CanFloat = false,
             Proportion = 0.20
         };
@@ -183,7 +189,7 @@ public sealed class FlowsheetDockFactory : Factory
             Title = "Integrator Controls",
             Content = _integratorContent,
             CanClose = false,
-            CanPin = true,
+            CanPin = false,
             CanFloat = false,
             Proportion = 0.20
         };
@@ -194,7 +200,7 @@ public sealed class FlowsheetDockFactory : Factory
             Title = "Watch",
             Content = _watchContent,
             CanClose = false,
-            CanPin = true,
+            CanPin = false,
             CanFloat = false,
             Proportion = 0.20
         };
@@ -337,8 +343,8 @@ public sealed class FlowsheetDockFactory : Factory
             Title = title,
             Content = host,
             CanClose = true,
-            CanPin = true,
-            CanFloat = true,
+            CanPin = false,
+            CanFloat = false,
             Proportion = 0.30
         };
 

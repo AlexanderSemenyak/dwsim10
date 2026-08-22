@@ -41,15 +41,25 @@
   </PropertyGroup>
 
   <!--
+    Mobile (Android/iOS) build switch. A head that sets the global property DwsimMobile=true (see the
+    DWSIM10Mobile repo) defines the VB constant MOBILE across the engine, which drops Windows-only
+    CAPE-OPEN COM re-implementations (see DWSIM.UnitOperations\BaseClasses\CapeOpen.vb) so the engine
+    AOT-compiles for mobile. Desktop builds never set it, so nothing changes there.
+  -->
+  <PropertyGroup Condition="'$(DwsimMobile)' == 'true' And '$(MSBuildProjectExtension)' == '.vbproj'">
+    <DefineConstants>$(DefineConstants),MOBILE=True</DefineConstants>
+  </PropertyGroup>
+
+  <!--
     One version for the whole repository. The legacy trees carry it in an AssemblyInfo per
     project, most of them with a wildcard build number, so the same assembly reported a
     different version on every build and the three editions never agreed on one.
   -->
 
   <PropertyGroup>
-    <Version>10.2.0</Version>
-    <AssemblyVersion>10.2.0.0</AssemblyVersion>
-    <FileVersion>10.2.0.0</FileVersion>
+    <Version>10.2.1</Version>
+    <AssemblyVersion>10.2.1.0</AssemblyVersion>
+    <FileVersion>10.2.1.0</FileVersion>
   </PropertyGroup>
 
   <!-- Package identity, for the projects that are published to a feed. -->

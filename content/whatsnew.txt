@@ -8,6 +8,22 @@
 - [NEW] Assay Manager: assays saved and loaded as XML, with the previous binary format still read
 - [NEW] Forced Solids tab back on the advanced property package editor, next to Property Overrides
 - [NEW] Cross-platform interface: the Natural Gas Properties and Heat of Combustion Calculator plugins are back, on the Plugins menu
+- [NEW] Pipe network: producing wells with a black-oil IPR (BSW and gas-oil ratio), gas lift injection, ESP/BCSS downhole pump and a critical-flow choke
+- [NEW] Pipe network: the real DWSIM hydraulic and thermal pipe editors embedded in each network pipe
+- [NEW] Pipe network: valves, compressor, bridge, non-return valve and an inline separator handled by the nodal solver
+- [NEW] Pipe network: nodal analysis plot (IPR x VLP), gas-lift allocation optimizer, well controls and field production-target allocation
+- [NEW] Pipe network: hydraulic profile plots, composite multi-pipe profiles, a bulk well table editor and a field production report in oilfield units
+- [NEW] Pipe network: flow-assurance screens - erosion, hydrate, wax appearance, asphaltene stability and Turner liquid-loading
+- [NEW] Pipe network: scaling and corrosion analysis coupled to the segments, with a formatted report
+- [NEW] Pipe network graph tools: tabbed chart/data layout with copy and export (PNG for charts, CSV for tables)
+- [NEW] Pipe network: a deviation survey (measured depth, inclination, azimuth) builds vertical, horizontal or directional tubing by minimum curvature, on the full pressure/temperature balance
+- [NEW] Pipe network: Fetkovich and Darcy radial inflow performance relations added alongside linear PI and Vogel
+- [NEW] Pipe network: gas-lift valve mechanics - injection rate from Thornhill-Craver critical orifice flow through the valve port
+- [NEW] Pipe network: a Production Well template (reservoir, IPR, tubing, wellhead) on the designer
+- [NEW] Pipe network: seven new samples - production well, wellhead choke, water injection, multi-well pad, pressure-reducing valve, pipeline pump stations and gas-condensate well
+- [NEW] Black Oil Compound Creator with laboratory PVT calibration, on both interfaces
+- [NEW] Case Library tab on the welcome screen, next to FOSSEE, on both interfaces
+- [NEW] Cross-platform interface: a results report from the Results menu, grouped by unit-operation type, as HTML, CSV or plain text
 - [CHG] IPOPT is now a managed solver shipped with DWSIM, checked against the native library over five thousand problems
 - [CHG] Gibbs reactor initial estimate solved by a managed simplex instead of the native lpsolve55
 - [CHG] Petalas-Aziz two-phase pressure drop converted from a native library to managed code
@@ -23,6 +39,15 @@
 - [CHG] Cross-platform interface: the compound search ranks matches by similarity so the exact name rises to the top, selects the best match, and adds it on Enter
 - [CHG] Cross-platform interface: uses the native system font (Segoe UI on Windows, San Francisco on macOS) for sharper text
 - [CHG] Patreon benefits bar: an Annual Membership option, and the join buttons are hidden once a valid key is verified
+- [CHG] Windows installers offer to remove a previous version first, keeping user simulations, custom compounds and added extensions
+- [CHG] Vapour thermal conductivity corrected for pressure with the Stiel-Thodos dense-gas method
+- [CHG] MCP Server: address simulation objects by tag, list their ids and canvas positions, and rename them
+- [CHG] Compositional pipe-network nodal solver accelerated with a response-surface model and a more stable outer loop
+- [CHG] Automatic and natural flowsheet layout orient objects along flow and lay recycle loops out as a rectangle
+- [CHG] Cross-platform interface: an interface scaling factor scales fonts, controls and menu icons together (issue #17)
+- [CHG] Cross-platform interface: the docked object editor gets a close button and roomier rows
+- [CHG] Pipe network designer: an equipment editor opens instantly, building its Results tab only when it is shown
+- [CHG] Refreshed User Guide and a rebuilt offline help, generated from the integrated help system, including the pipe network chapter
 - [FIX] A product of a CAPE-OPEN unit operation was re-flashed by the flowsheet property package, discarding the phase split the unit had computed
 - [FIX] Object editors were cut off on a display set above 96 dots per inch; the distillation column stage table was the most visible case
 - [FIX] A flowsheet opened from the desktop on macOS started DWSIM with nothing loaded and reported an unsupported file
@@ -55,3 +80,28 @@
 - [FIX] Cross-platform interface: external unit operations (bioreactor, anaerobic digester) could not be added from the palette or the context menu
 - [FIX] Cross-platform interface: premium, refining and biochemical unit operations were spread across the generic palette sections instead of their own
 - [FIX] Cross-platform interface: the compressor and expander performance-curve editor did not open on the expander and could not create curves
+- [FIX] Cross-platform interface: deleting a material stream now releases the connected ports and removes the connection lines, and it no longer stays in the inlet/outlet lists (#22, #24)
+- [FIX] Cross-platform interface: undocking a panel no longer leaves its content blank when it is docked again (#25)
+- [FIX] Cross-platform interface: the DWSIM Assistant helper is now closed when DWSIM exits (#23)
+- [FIX] Cross-platform interface: connect mode now connects two objects by clicking the source and then the target (#21)
+- [FIX] Cross-platform interface: the property-package selector no longer adds a package on type-ahead, only on a deliberate pick (#18)
+- [FIX] Flash (PV/PH/PS): an unconverged temperature is now rejected instead of flowing on as a misleading error; the PV flash is seeded near the dew point
+- [FIX] macOS: the app no longer crashes on the embedded web view, and the assistant helper is shipped executable (#13)
+- [FIX] Cross-platform interface: a tool opening a web page falls back to the system browser where no embedded view is available
+- [FIX] Extensions folder: an already-loaded extension assembly is no longer loaded a second time
+- [FIX] Steam Tables: a flash is kept inside the range the correlations are fitted to
+- [FIX] Anaerobic Digester: the biogas composition partitions CO2, NH3 and water vapour correctly
+- [FIX] Dynamic Heat Exchanger: the cell pressure is floored at the minimum pressure
+- [FIX] Cross-platform interface: the Script unit operation editor opens a script edit window, and Flowsheet.WriteMessage works from scripts
+- [FIX] Cross-platform interface: the Script Manager opens under the Semi theme, extension menu-bar buttons appear after a flowsheet loads, and the sample scripts run on Python 3
+- [FIX] Pipe network: electrolyte scaling and corrosion speciation corrected
+- [FIX] Pipe network: solve gating, translated property names, zoom-to-fit at any display scaling, and Results populated on every block after the solve
+- [FIX] Pipe network: boundary streams attached to the block ports, profile-plot crash fixed, live solver progress, and headless-saved networks reload
+- [FIX] Pipe network nodal solver: a full Newton step is required before convergence, and the control-valve loop tolerance was tightened
+- [FIX] Membership: the higher of the cached and live subscription level is honoured (issue #26)
+- [FIX] Missing biomass and extra compounds restored in the shared distribution content (issue #28)
+- [FIX] Cross-platform interface: the master property table editor keeps its object and property selection
+- [FIX] Inserted property tables and charts on a flowsheet draw instead of reporting an error
+- [FIX] Reaction Manager no longer fails when adding a component that is not already in the reaction
+- [FIX] Pipe network designer: the Solve and Abort toolbar buttons are no longer oversized
+- [FIX] Pipe network designer (Windows): Ctrl, Shift and Alt reach the canvas again, restoring multi-selection and Shift-drag offset
