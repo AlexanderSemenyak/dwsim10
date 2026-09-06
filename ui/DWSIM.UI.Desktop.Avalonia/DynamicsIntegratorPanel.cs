@@ -7,6 +7,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using DWSIM.Automation.DynamicRunner;
 using DWSIM.Interfaces;
 
 namespace DWSIM.UI.Desktop.Avalonia;
@@ -41,15 +42,15 @@ public sealed class DynamicsIntegratorPanel : StackPanel
         // --- Row 1: Schedule + View Results ---
         _cbSchedule = new ComboBox
         {
-            Width = 300,
-            FontSize = 11,
+            Width = DWSIM.UI.Shared.Avalonia.UiScale.Size(300),
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
             VerticalAlignment = VerticalAlignment.Center
         };
 
         _btnViewResults = new Button
         {
             Content = "View Results",
-            FontSize = 11,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
             Padding = new Thickness(8, 3),
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(8, 0, 0, 0)
@@ -65,7 +66,7 @@ public sealed class DynamicsIntegratorPanel : StackPanel
         row1.Children.Add(new TextBlock
         {
             Text = "Schedule:",
-            FontSize = 11,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 4, 0)
         });
@@ -77,9 +78,9 @@ public sealed class DynamicsIntegratorPanel : StackPanel
         _btnPlay = new Button
         {
             Content = "▶",  // play triangle
-            FontSize = 16,
-            Width = 36,
-            Height = 36,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(16),
+            Width = DWSIM.UI.Shared.Avalonia.UiScale.Size(36),
+            Height = DWSIM.UI.Shared.Avalonia.UiScale.Size(36),
             Padding = new Thickness(0),
             VerticalContentAlignment = VerticalAlignment.Center,
             HorizontalContentAlignment = HorizontalAlignment.Center
@@ -90,9 +91,9 @@ public sealed class DynamicsIntegratorPanel : StackPanel
         _btnRT = new Button
         {
             Content = "⏱",  // stopwatch (real-time)
-            FontSize = 16,
-            Width = 36,
-            Height = 36,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(16),
+            Width = DWSIM.UI.Shared.Avalonia.UiScale.Size(36),
+            Height = DWSIM.UI.Shared.Avalonia.UiScale.Size(36),
             Padding = new Thickness(0),
             VerticalContentAlignment = VerticalAlignment.Center,
             HorizontalContentAlignment = HorizontalAlignment.Center
@@ -103,9 +104,9 @@ public sealed class DynamicsIntegratorPanel : StackPanel
         _btnStop = new Button
         {
             Content = "⏹",  // stop
-            FontSize = 16,
-            Width = 36,
-            Height = 36,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(16),
+            Width = DWSIM.UI.Shared.Avalonia.UiScale.Size(36),
+            Height = DWSIM.UI.Shared.Avalonia.UiScale.Size(36),
             Padding = new Thickness(0),
             Foreground = new SolidColorBrush(Colors.Red),
             VerticalContentAlignment = VerticalAlignment.Center,
@@ -117,7 +118,7 @@ public sealed class DynamicsIntegratorPanel : StackPanel
         _lbStatus = new TextBlock
         {
             Text = "00:00:00 / 00:30:00",
-            FontSize = 11,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
             FontFamily = new FontFamily("Consolas,Courier New,monospace"),
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(8, 0)
@@ -128,8 +129,8 @@ public sealed class DynamicsIntegratorPanel : StackPanel
             Minimum = 0,
             Maximum = 100,
             Value = 0,
-            Width = 200,
-            Height = 16,
+            Width = DWSIM.UI.Shared.Avalonia.UiScale.Size(200),
+            Height = DWSIM.UI.Shared.Avalonia.UiScale.Size(16),
             VerticalAlignment = VerticalAlignment.Center
         };
 
@@ -230,7 +231,7 @@ public sealed class DynamicsIntegratorPanel : StackPanel
 
     /// <summary>
     /// Runs the current schedule on a background thread through
-    /// <see cref="DynamicsIntegratorRunner"/>, keeping the toolbar in sync.
+    /// <see cref="IntegratorRunner"/>, keeping the toolbar in sync.
     /// </summary>
     public async Task RunAsync(bool realtime)
     {
@@ -250,15 +251,20 @@ public sealed class DynamicsIntegratorPanel : StackPanel
         _btnRT.IsEnabled = false;
         _btnViewResults.IsEnabled = false;
 
-        var options = new DynamicsIntegratorRunner.RunOptions
+        var options = new IntegratorRunOptions
         {
             RealTime = realtime,
+            EnableHistorian = fs.DynamicsManager.EnableHistorian,
             AbortRequested = () => Abort,
-            OnProgress = (current, total, status) => Dispatcher.UIThread.Post(() =>
+            OnProgress = p => Dispatcher.UIThread.Post(() =>
             {
+                // Real-time runs report an unbounded total; the bar tracks the step count instead.
+                var total = double.IsInfinity(p.TotalSeconds) || p.TotalSeconds > int.MaxValue
+                    ? p.CurrentSeconds
+                    : p.TotalSeconds;
                 _pbProgress.Maximum = Math.Max(1, total);
-                _pbProgress.Value = Math.Min(current, _pbProgress.Maximum);
-                _lbStatus.Text = status;
+                _pbProgress.Value = Math.Min(p.CurrentSeconds, _pbProgress.Maximum);
+                _lbStatus.Text = p.Status;
             }),
             // Throttled: the integrator can step far faster than the canvas can redraw, and an
             // unbounded queue of refresh posts starves the UI thread.
@@ -277,7 +283,8 @@ public sealed class DynamicsIntegratorPanel : StackPanel
         List<Exception> exceptions;
         try
         {
-            exceptions = await Task.Run(() => DynamicsIntegratorRunner.Run(fs, options));
+            var result = await new IntegratorRunner(fs).RunAsync(options);
+            exceptions = result.Exceptions.ToList();
         }
         catch (Exception ex)
         {

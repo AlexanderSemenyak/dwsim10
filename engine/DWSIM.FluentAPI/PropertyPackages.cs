@@ -61,8 +61,8 @@ namespace DWSIM.Automation.FluentAPI
         public const string CoolPropIncompressibleMixture = "CoolProp (Incompressible Mixtures)";
         /// <summary>GERG-2008 wide-range reference EOS for natural-gas mixtures (21 components).</summary>
         public const string GERG2008 = "GERG-2008";
-        /// <summary>PC-SAFT EOS - physically motivated for chain-like and associating fluids.</summary>
-        public const string PCSAFT = "PC-SAFT";
+        /// <summary>PC-SAFT EOS - physically motivated for chain-like and associating fluids, including polymers.</summary>
+        public const string PCSAFT = "PC-SAFT (with Association Support) (.NET Code)";
         /// <summary>Ideal electrolyte model - basic aqueous-ion behaviour without activity corrections.</summary>
         public const string IdealElectrolyte = "Ideal Electrolyte";
         /// <summary>CAPE-OPEN external property-package wrapper - registers any compliant 3rd-party PP.</summary>
@@ -115,7 +115,7 @@ namespace DWSIM.Automation.FluentAPI
             public const string SRKCPA = "SRK-CPA";
 
             /// <summary>CCUS Carbon Capture - eNRTL for CO2 capture with MEA, DEA, MDEA, PZ, AMP.</summary>
-            public const string CarbonCapture = "Carbon Capture (eNRTL)";
+            public const string CarbonCapture = "CO2 Capture (eNRTL)";
             /// <summary>CCUS CO2 Transport - Span-Wagner EOS for pure CO2, PR for CO2-rich mixtures.</summary>
             public const string CO2Transport = "CO2 Transport (Span-Wagner/PR)";
             /// <summary>CCUS CO2 Storage - eNRTL/Duan-Sun for CO2 geological storage in saline aquifers.</summary>

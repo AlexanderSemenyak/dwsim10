@@ -58,6 +58,11 @@ Namespace PropertyPackages.Auxiliary.FlashAlgorithms
 
         Public Property LimitVaporFraction As Boolean = True
 
+        'Upper bound on the vapour fraction for the current flash. It is 1.0 for an ordinary mixture and
+        '1 - sum(non-volatile mole fractions) when the feed carries a non-volatile compound (e.g. a polymer),
+        'which cannot enter the vapour. Set per call in Flash_PT_1.
+        Public Property MaxVaporFraction As Double = 1.0
+
         Public PTFlashFunction As Func(Of Double(), Double, Double, PropertyPackages.PropertyPackage, Boolean, Double(), Object)
 
         Sub New()
@@ -257,6 +262,27 @@ Namespace PropertyPackages.Auxiliary.FlashAlgorithms
 
             Vp = PP.RET_VPVAP(T)
 
+            ' Non-volatile components (e.g. a polymer) stay in the liquid. The single-component shortcut
+            ' below keys off the largest mole fraction, which for a polymer solution is the solvent (a
+            ' polymer has a tiny mole fraction), so it would collapse the flash to a pure-solvent bubble/dew
+            ' and never form the solvent-vapour + polymer-liquid split. Skip that shortcut when present.
+            Dim nonvol = PP.RET_VNONVOLATILE()
+            Dim hasNonVol As Boolean = False
+            Dim sumnonvol As Double = 0.0
+            For i = 0 To n
+                If nonvol(i) Then
+                    hasNonVol = True
+                    sumnonvol += Vz(i)
+                End If
+            Next
+            ' The vapour cannot hold the non-volatiles, so the largest possible vapour fraction is the
+            ' one that puts every volatile in the vapour: Vmax = 1 - sum(non-volatile mole fractions).
+            ' Without this cap the Newton step overshoots to V = 1, where the whole feed (polymer included)
+            ' is reported as vapour and the liquid product vanishes.
+            Dim VmaxCap As Double = 1.0
+            If hasNonVol Then VmaxCap = 1.0 - sumnonvol
+            MaxVaporFraction = VmaxCap
+
             If Not ReuseKI Then
                 Ki = Vp.MultiplyConstY(1 / P)
                 For i = 0 To n
@@ -281,7 +307,7 @@ Namespace PropertyPackages.Auxiliary.FlashAlgorithms
 
             'Estimate V
 
-            If T > MathEx.Common.Max(VTc, Vz) Then
+            If T > MathEx.Common.Max(VTc, Vz) And Not hasNonVol Then
                 Vy = Vz
                 Vx = Vy.DivideY(Ki).NormalizeY
                 Vx = Vx.ReplaceInvalidsWithZeroes()
@@ -309,7 +335,7 @@ Namespace PropertyPackages.Auxiliary.FlashAlgorithms
             Pb = Pmax
             Pd = Pmin
 
-            If Abs(Pb - Pd) / Pb < 0.0000001 And Vz.Max > 0.99 Then
+            If Abs(Pb - Pd) / Pb < 0.0000001 And Vz.Max > 0.99 And Not hasNonVol Then
                 'one comp only
                 Px = Vp.MultiplyY(Vz).Sum
                 d2 = Date.Now
@@ -364,6 +390,7 @@ Namespace PropertyPackages.Auxiliary.FlashAlgorithms
             If Vmin = 1.0# Then Vmin = 0.0#
             If Vmax = 0.0# Then Vmax = 1.0#
             If Vmax > 1.0# Then Vmax = 1.0#
+            If Vmax > VmaxCap Then Vmax = VmaxCap
 
             If Vest >= 0 Then
                 V = Vest
@@ -493,6 +520,27 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                         .RequestType = Interfaces.ConvergenceHelperRequestType.PTFlash})
             End If
 
+            'Reject a trivial two-phase result: when successive substitution stalls with every K-value
+            'at unity the two "phases" are the feed itself, reported as a spurious split. Collapse it to
+            'the single phase the feed actually is, told apart by its compressibility factor.
+            If V > 0.000001 AndAlso V < 0.999999 Then
+                Dim maxlnk As Double = 0.0
+                For itk As Integer = 0 To n
+                    If Vx(itk) > 1.0E-20 AndAlso Vy(itk) > 1.0E-20 Then maxlnk = Math.Max(maxlnk, Math.Abs(Math.Log(Vy(itk) / Vx(itk))))
+                Next
+                If maxlnk < 0.0001 Then
+                    Dim zfeed = PP.AUX_Z(Vz, T, P, Interfaces.Enums.PhaseName.Liquid)
+                    If zfeed > 0.3 Then
+                        V = 1.0 : L = 0.0
+                    Else
+                        V = 0.0 : L = 1.0
+                    End If
+                    Vx = DirectCast(Vz.Clone(), Double())
+                    Vy = DirectCast(Vz.Clone(), Double())
+                    WriteDebugInfo("PT Flash [NL]: trivial (K~1) split rejected; reported as single phase.")
+                End If
+            End If
+
             If PP.ImmiscibleLiquids.Count > 0 Then
 
                 Dim immscheck As Object() = ProcessImmiscibleLiquids(PP, L, 0.0, Vx, PP.RET_NullVector())
@@ -594,33 +642,64 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                     ' Secondary criterion: V stabilized
                     If Math.Abs(e3) < 0.000001 And ecount > 0 Then Exit Do
 
-                    If damplevel = 1 Then
-                        dfac = (ecount + 1) * 0.2
-                        If dfac > 1.0 Then dfac = 1.0
-                        If -F / dF * dfac + Vant > 1.0 Or -F / dF * dfac + Vant < 0.0 Then
-                            dfac /= 10
-                        End If
-                    ElseIf damplevel = 2 Then
-                        dfac = (ecount + 1) * 0.05
-                        If dfac > 1.0 Then dfac = 1.0
-                        If -F / dF * dfac + Vant > 1.0 Or -F / dF * dfac + Vant < 0.0 Then
-                            dfac /= 50
-                        End If
-                    End If
+                    If MaxVaporFraction < 1.0# Then
 
-                    V = -F / dF * dfac + Vant
+                        ' A non-volatile component is present. The Rachford-Rice function is monotonic in V, so
+                        ' solve it by bracketing over [0, MaxVaporFraction] instead of a Newton step that
+                        ' overshoots the near-unity root. The volatile K-value swings over orders of magnitude
+                        ' between a solvent-rich and a polymer-rich liquid, so the physical two-phase root is an
+                        ' unstable fixed point of plain successive substitution (it oscillates between all-liquid
+                        ' and all-vapour). Damp the liquid fraction geometrically (it spans decades) to spiral in.
+                        Dim Kloc = Ki
+                        Dim rrf As Func(Of Double, Double) =
+                            Function(vv) Vz.MultiplyY(Kloc.AddConstY(-1).DivideY(Kloc.AddConstY(-1).MultiplyConstY(vv).AddConstY(1))).SumY
+                        Dim Vsolve As Double
+                        If rrf(0.0#) <= 0.0# Then
+                            Vsolve = 0.0#
+                        ElseIf rrf(MaxVaporFraction) >= 0.0# Then
+                            Vsolve = MaxVaporFraction
+                        Else
+                            Vsolve = Brent.BrentOpt3(0.0#, MaxVaporFraction, 20, 0.0000001, 100, rrf)
+                        End If
+                        Dim Lant As Double = 1.0# - Vant
+                        Dim Lsolve As Double = 1.0# - Vsolve
+                        If Lant > 0.0# AndAlso Lsolve > 0.0# Then
+                            V = 1.0# - Lant * (Lsolve / Lant) ^ 0.3
+                        Else
+                            V = Vant + 0.3 * (Vsolve - Vant)
+                        End If
 
-                    If LimitVaporFraction Then
-                        If V < 0.0 Then
-                            overshoot = True
-                            V = 0.0
-                            Exit Do
+                    Else
+
+                        If damplevel = 1 Then
+                            dfac = (ecount + 1) * 0.2
+                            If dfac > 1.0 Then dfac = 1.0
+                            If -F / dF * dfac + Vant > 1.0 Or -F / dF * dfac + Vant < 0.0 Then
+                                dfac /= 10
+                            End If
+                        ElseIf damplevel = 2 Then
+                            dfac = (ecount + 1) * 0.05
+                            If dfac > 1.0 Then dfac = 1.0
+                            If -F / dF * dfac + Vant > 1.0 Or -F / dF * dfac + Vant < 0.0 Then
+                                dfac /= 50
+                            End If
                         End If
-                        If V > 1.0 Then
-                            overshoot = True
-                            V = 1.0
-                            Exit Do
+
+                        V = -F / dF * dfac + Vant
+
+                        If LimitVaporFraction Then
+                            If V < 0.0 Then
+                                overshoot = True
+                                V = 0.0
+                                Exit Do
+                            End If
+                            If V > MaxVaporFraction Then
+                                overshoot = True
+                                V = MaxVaporFraction
+                                Exit Do
+                            End If
                         End If
+
                     End If
 
                     IObj2?.Paragraphs.Add(String.Format("Updated Vapor Fraction (<math_inline>\beta</math_inline>) value: {0}", V))
@@ -3007,6 +3086,43 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
 
         End Function
 
+
+        ''' <summary>
+        ''' K values with the compounds that cannot enter the vapour pinned down.
+        ''' </summary>
+        ''' <remarks>
+        ''' A salt or an ion is dissolved in the liquid, not suspended in it: it has to stay in the
+        ''' equilibrium basis, because it dilutes the volatile compounds and that dilution is what
+        ''' shifts the boiling point. What it must not do is enter the vapour - the vapour pressure
+        ''' the databases carry for these species is an extrapolation far outside its range
+        ''' (Iron(II) (ion) comes out at 3.5 bar at 373 K, ahead of water), so it is replaced rather
+        ''' than trusted. The temperature derivative of a pinned constant is zero, which is also
+        ''' what a non-volatile contributes.
+        ''' </remarks>
+        Private Function CalcK_NV(PP As PropertyPackages.PropertyPackage, Vx As Double(), Vy As Double(),
+                                  T As Double, P As Double, nonvolatile As Boolean()) As Double()
+            Return PinNonVolatiles(PP.DW_CalcKvalue(Vx, Vy, T, P), nonvolatile)
+        End Function
+
+        ''' <summary>K values from a single composition, with the non-volatile compounds pinned.</summary>
+        Private Function CalcK_NV(PP As PropertyPackages.PropertyPackage, Vz As Double(),
+                                  T As Double, P As Double, nonvolatile As Boolean()) As Double()
+            Return PinNonVolatiles(PP.DW_CalcKvalue(Vz, T, P), nonvolatile)
+        End Function
+
+        ''' <summary>
+        ''' Pins the K values of the flagged compounds. Not to zero: the flash divides a vapour mole
+        ''' fraction by K to get the liquid one, and the ratio of those two vanishing numbers is what
+        ''' carries the non-volatile into the liquid, where it belongs.
+        ''' </summary>
+        Private Function PinNonVolatiles(K As Double(), nonvolatile As Boolean()) As Double()
+            If nonvolatile Is Nothing Then Return K
+            For i As Integer = 0 To K.Length - 1
+                If i < nonvolatile.Length AndAlso nonvolatile(i) Then K(i) = 1.0E-20
+            Next
+            Return K
+        End Function
+
         Public Function Flash_PV_1(ByVal Vz2 As Double(), ByVal P As Double, ByVal V As Double, ByVal Tref As Double, ByVal PP As PropertyPackages.PropertyPackage, Optional ByVal ReuseKI As Boolean = False, Optional ByVal PrevKi As Double() = Nothing, Optional OldTempEstimation As Boolean = False) As Object
 
             Dim IObj As Inspector.InspectorItem = Inspector.Host.GetNewInspectorItem()
@@ -3054,12 +3170,24 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
 
             Dim cprops = PP.DW_GetConstantProperties()
 
+            Dim nonvolatile(n) As Boolean
+
             For i = 0 To n
                 Tsat(i) = PP.AUX_TSATi(P, i)
-                If cprops(i).IsSolid Or cprops(i).TemperatureOfFusion > 1000.0 Or cprops(i).Normal_Boiling_Point * 0.7 > 1000.0 Then
-                    'solid. leave out of the calculation
+                If cprops(i).IsSolid Then
+                    'declared solid: not part of the liquid solution, so leave it out of the
+                    'calculation entirely and fold it back in once the equilibrium is solved.
                     Vs(i) = Vz2(i)
                     Vz(i) = 0.0
+                ElseIf cprops(i).TemperatureOfFusion > 1000.0 Or cprops(i).Normal_Boiling_Point * 0.7 > 1000.0 Then
+                    'A salt or an ion. It cannot enter the vapour, but it is dissolved in the liquid
+                    'and so it stays in the equilibrium basis. Taking it out of the basis instead
+                    'made a 2 mol-% brine look like pure water: the reduced mixture passed
+                    'AUX_IS_SINGLECOMP, the flash returned the boiling point of water with no
+                    'boiling-point rise, and the vapour and liquid amounts came back on two
+                    'different bases and added up to 1 + S. Every one of the 50 compounds this
+                    'catches in the shipped databases is a salt or an ion.
+                    nonvolatile(i) = True
                 End If
             Next
 
@@ -3068,6 +3196,20 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
             If S > 0.0 Then
                 Vs = Vs.NormalizeY()
                 Vz = Vz.NormalizeY()
+            End If
+
+            ' Whatever was declared solid above has been taken out of the basis, and the basis
+            ' renormalised, so the specified vapour fraction - which the caller means as a fraction
+            ' of the WHOLE mixture - has to be expressed on that basis too, and the answer scaled
+            ' back to the original one when the phases are recombined further down. Without the
+            ' conversion the vapour fraction came back on the reduced basis while the liquid
+            ' fraction came back on the full one, and the two added up to 1 + S. Asking for more
+            ' vapour than there is volatile material is not something the equilibrium can deliver,
+            ' so the request is capped there.
+            Dim SolidFreeBasis As Double = 1.0 - S
+            If S > 0.0 And SolidFreeBasis > 0.0 Then
+                V = Math.Min(V / SolidFreeBasis, 1.0)
+                L = 1 - V
             End If
 
             VTc = PP.RET_VTC()
@@ -3102,6 +3244,7 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                     Vp(i) = PP.AUX_PVAPi(i, T)
                     Ki(i) = Vp(i) / P
                     If Double.IsNaN(Ki(i)) Or Double.IsInfinity(Ki(i)) Then Ki(i) = 1.0E+20
+                    If nonvolatile(i) Then Ki(i) = 1.0E-20
                     i += 1
                 Loop Until i = n + 1
             Else
@@ -3110,6 +3253,7 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                         IObj?.SetCurrent
                         Ki(i) = PrevKi(i)
                         If Double.IsNaN(Ki(i)) Or Double.IsInfinity(Ki(i)) Then Ki(i) = 1.0E+20
+                        If nonvolatile(i) Then Ki(i) = 1.0E-20
                     Next
                 Else
                     i = 0
@@ -3118,6 +3262,7 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                         Vp(i) = PP.AUX_PVAPi(i, T)
                         Ki(i) = Vp(i) / P
                         If Double.IsNaN(Ki(i)) Or Double.IsInfinity(Ki(i)) Then Ki(i) = 1.0E+20
+                        If nonvolatile(i) Then Ki(i) = 1.0E-20
                         i += 1
                     Loop Until i = n + 1
                 End If
@@ -3162,10 +3307,13 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
 
                 If S > 0 Then
 
-                    Dim VnL = Vx.MultiplyConstY(L)
-                    Dim VnV = Vy.MultiplyConstY(V)
+                    ' Back to the original basis: the vapour and the liquid the equilibrium
+                    ' returned are fractions of the solid-free part, which is (1 - S) of the whole.
+                    Dim VnL = Vx.MultiplyConstY(L * SolidFreeBasis)
+                    Dim VnV = Vy.MultiplyConstY(V * SolidFreeBasis)
                     Dim VnS = Vs.MultiplyConstY(S)
 
+                    V = V * SolidFreeBasis
                     L = VnL.AddY(VnS).SumY
 
                     Vx = VnL.AddY(VnS).MultiplyConstY(1 / (L + 0.0000000001))
@@ -3228,9 +3376,9 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                         IObj3?.Paragraphs.Add(String.Format("Tentative value for K: {0}", Ki.ToMathArrayString))
 
                         If PP.ShouldUseKvalueMethod2 Then
-                            Ki = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T, P)
+                            Ki = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T, P, nonvolatile)
                         Else
-                            Ki = PP.DW_CalcKvalue(Vx, Vy, T, P)
+                            Ki = CalcK_NV(PP, Vx, Vy, T, P, nonvolatile)
                         End If
 
                         marcador = 0
@@ -3284,30 +3432,30 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                             If fpstencil Then
                                 Dim task1 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K1 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - 2 * epsilon, P)
+                                                                   K1 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - 2 * epsilon, P, nonvolatile)
                                                                Else
-                                                                   K1 = PP.DW_CalcKvalue(Vx, Vy, T - 2 * epsilon, P)
+                                                                   K1 = CalcK_NV(PP, Vx, Vy, T - 2 * epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Dim task2 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K2 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P)
+                                                                   K2 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P, nonvolatile)
                                                                Else
-                                                                   K2 = PP.DW_CalcKvalue(Vx, Vy, T - epsilon, P)
+                                                                   K2 = CalcK_NV(PP, Vx, Vy, T - epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Dim task3 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K3 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P)
+                                                                   K3 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P, nonvolatile)
                                                                Else
-                                                                   K3 = PP.DW_CalcKvalue(Vx, Vy, T + epsilon, P)
+                                                                   K3 = CalcK_NV(PP, Vx, Vy, T + epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Dim task4 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K4 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + 2 * epsilon, P)
+                                                                   K4 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + 2 * epsilon, P, nonvolatile)
                                                                Else
-                                                                   K4 = PP.DW_CalcKvalue(Vx, Vy, T + 2 * epsilon, P)
+                                                                   K4 = CalcK_NV(PP, Vx, Vy, T + 2 * epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Task.WaitAll(task1, task2, task3, task4)
@@ -3315,16 +3463,16 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                             Else
                                 Dim task1 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K1 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P)
+                                                                   K1 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P, nonvolatile)
                                                                Else
-                                                                   K1 = PP.DW_CalcKvalue(Vx, Vy, T - epsilon, P)
+                                                                   K1 = CalcK_NV(PP, Vx, Vy, T - epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Dim task2 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K2 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P)
+                                                                   K2 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P, nonvolatile)
                                                                Else
-                                                                   K2 = PP.DW_CalcKvalue(Vx, Vy, T + epsilon, P)
+                                                                   K2 = CalcK_NV(PP, Vx, Vy, T + epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Task.WaitAll(task1, task2)
@@ -3333,15 +3481,15 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                         Else
                             IObj?.SetCurrent
                             If PP.ShouldUseKvalueMethod2 Then
-                                K1 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P)
+                                K1 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P, nonvolatile)
                             Else
-                                K1 = PP.DW_CalcKvalue(Vx, Vy, T - epsilon, P)
+                                K1 = CalcK_NV(PP, Vx, Vy, T - epsilon, P, nonvolatile)
                             End If
                             IObj?.SetCurrent
                             If PP.ShouldUseKvalueMethod2 Then
-                                K2 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P)
+                                K2 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P, nonvolatile)
                             Else
-                                K2 = PP.DW_CalcKvalue(Vx, Vy, T + epsilon, P)
+                                K2 = CalcK_NV(PP, Vx, Vy, T + epsilon, P, nonvolatile)
                             End If
                             dKdT = K2.SubtractY(K1).MultiplyConstY(1 / (2 * epsilon))
                         End If
@@ -3412,14 +3560,14 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                                 Dim bmin As New Brent
                                 T = bmin.BrentOpt2(Tmin, Tmax, 500, etol, 100,
                                     Function(tval)
-                                        Dim Kitmp = PP.DW_CalcKvalue(Vx, Vy, tval, P)
+                                        Dim Kitmp = CalcK_NV(PP, Vx, Vy, tval, P, nonvolatile)
                                         If V = 0 Then
                                             Return Kitmp.MultiplyY(Vx).SumY - 1.0
                                         Else
                                             Return Vy.DivideY(Kitmp).SumY - 1.0
                                         End If
                                     End Function)
-                                Ki = PP.DW_CalcKvalue(Vx, Vy, T, P)
+                                Ki = CalcK_NV(PP, Vx, Vy, T, P, nonvolatile)
                                 If V = 0 Then
                                     Vy = Ki.MultiplyY(Vx).NormalizeY()
                                 Else
@@ -3448,7 +3596,7 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                                 Dim bmin As New Brent
                                 T = bmin.BrentOpt2(Tmin, Tmax, 500, etol, 100,
                                     Function(tval)
-                                        Dim Kitmp = PP.DW_CalcKvalue(Vx, Vy, tval, P)
+                                        Dim Kitmp = CalcK_NV(PP, Vx, Vy, tval, P, nonvolatile)
                                         If V = 0 Then
                                             Return Kitmp.MultiplyY(Vx).SumY - 1.0
                                         Else
@@ -3458,7 +3606,7 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                             End If
                         End If
 
-                        Ki = PP.DW_CalcKvalue(Vx, Vy, T, P)
+                        Ki = CalcK_NV(PP, Vx, Vy, T, P, nonvolatile)
 
                         If V = 0.0 Then
                             Vy = Ki.MultiplyY(Vx).NormalizeY()
@@ -3519,7 +3667,7 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
 
                     IObj3?.Paragraphs.Add(String.Format("Tentative value for K: {0}", Ki.ToMathArrayString))
 
-                    Ki = PP.DW_CalcKvalue(Vx, Vy, T, P)
+                    Ki = CalcK_NV(PP, Vx, Vy, T, P, nonvolatile)
 
                     i = 0
                     Do
@@ -3558,30 +3706,30 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                             If fpstencil Then
                                 Dim task1 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K1 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - 2 * epsilon, P)
+                                                                   K1 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - 2 * epsilon, P, nonvolatile)
                                                                Else
-                                                                   K1 = PP.DW_CalcKvalue(Vx, Vy, T - 2 * epsilon, P)
+                                                                   K1 = CalcK_NV(PP, Vx, Vy, T - 2 * epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Dim task2 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K2 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P)
+                                                                   K2 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P, nonvolatile)
                                                                Else
-                                                                   K2 = PP.DW_CalcKvalue(Vx, Vy, T - epsilon, P)
+                                                                   K2 = CalcK_NV(PP, Vx, Vy, T - epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Dim task3 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K3 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P)
+                                                                   K3 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P, nonvolatile)
                                                                Else
-                                                                   K3 = PP.DW_CalcKvalue(Vx, Vy, T + epsilon, P)
+                                                                   K3 = CalcK_NV(PP, Vx, Vy, T + epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Dim task4 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K4 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + 2 * epsilon, P)
+                                                                   K4 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + 2 * epsilon, P, nonvolatile)
                                                                Else
-                                                                   K4 = PP.DW_CalcKvalue(Vx, Vy, T + 2 * epsilon, P)
+                                                                   K4 = CalcK_NV(PP, Vx, Vy, T + 2 * epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Task.WaitAll(task1, task2, task3, task4)
@@ -3589,16 +3737,16 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                             Else
                                 Dim task1 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K1 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P)
+                                                                   K1 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P, nonvolatile)
                                                                Else
-                                                                   K1 = PP.DW_CalcKvalue(Vx, Vy, T - epsilon, P)
+                                                                   K1 = CalcK_NV(PP, Vx, Vy, T - epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Dim task2 = TaskHelper.Run(Sub()
                                                                If PP.ShouldUseKvalueMethod2 Then
-                                                                   K2 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P)
+                                                                   K2 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P, nonvolatile)
                                                                Else
-                                                                   K2 = PP.DW_CalcKvalue(Vx, Vy, T + epsilon, P)
+                                                                   K2 = CalcK_NV(PP, Vx, Vy, T + epsilon, P, nonvolatile)
                                                                End If
                                                            End Sub, Settings.TaskCancellationTokenSource.Token)
                                 Task.WaitAll(task1, task2)
@@ -3607,15 +3755,15 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                         Else
                             IObj?.SetCurrent
                             If PP.ShouldUseKvalueMethod2 Then
-                                K1 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P)
+                                K1 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T - epsilon, P, nonvolatile)
                             Else
-                                K1 = PP.DW_CalcKvalue(Vx, Vy, T - epsilon, P)
+                                K1 = CalcK_NV(PP, Vx, Vy, T - epsilon, P, nonvolatile)
                             End If
                             IObj?.SetCurrent
                             If PP.ShouldUseKvalueMethod2 Then
-                                K2 = PP.DW_CalcKvalue(Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P)
+                                K2 = CalcK_NV(PP, Vx.MultiplyConstY(L).AddY(Vy.MultiplyConstY(V)), T + epsilon, P, nonvolatile)
                             Else
-                                K2 = PP.DW_CalcKvalue(Vx, Vy, T + epsilon, P)
+                                K2 = CalcK_NV(PP, Vx, Vy, T + epsilon, P, nonvolatile)
                             End If
                             dKdT = K2.SubtractY(K1).MultiplyConstY(1 / (2 * epsilon))
                         End If
@@ -3688,14 +3836,14 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
                             Dim bmin As New Brent
                             T = bmin.BrentOpt2(Tmin, Tmax, 500, etol, 100,
                                 Function(tval)
-                                    Dim Kitmp = PP.DW_CalcKvalue(Vx, Vy, tval, P)
+                                    Dim Kitmp = CalcK_NV(PP, Vx, Vy, tval, P, nonvolatile)
                                     If V <= 0.5 Then
                                         Return Kitmp.MultiplyY(Vx).SumY - 1.0
                                     Else
                                         Return Vy.DivideY(Kitmp).SumY - 1.0
                                     End If
                                 End Function)
-                            Ki = PP.DW_CalcKvalue(Vx, Vy, T, P)
+                            Ki = CalcK_NV(PP, Vx, Vy, T, P, nonvolatile)
                             i = 0
                             Do
                                 If Vz(i) <> 0 Then
@@ -3747,10 +3895,13 @@ out:        WriteDebugInfo("PT Flash [NL]: Converged in " & ecount & " iteration
 
             If S > 0 Then
 
-                Dim VnL = Vx.MultiplyConstY(L)
-                Dim VnV = Vy.MultiplyConstY(V)
+                ' Back to the original basis: the vapour and the liquid the equilibrium returned
+                ' are fractions of the solid-free part, which is (1 - S) of the whole.
+                Dim VnL = Vx.MultiplyConstY(L * SolidFreeBasis)
+                Dim VnV = Vy.MultiplyConstY(V * SolidFreeBasis)
                 Dim VnS = Vs.MultiplyConstY(S)
 
+                V = V * SolidFreeBasis
                 L = VnL.AddY(VnS).SumY
 
                 Vx = VnL.AddY(VnS).MultiplyConstY(1 / (L + 0.0000000001))

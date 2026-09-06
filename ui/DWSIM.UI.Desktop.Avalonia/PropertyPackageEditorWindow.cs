@@ -9,6 +9,7 @@ using Avalonia.Media;
 using DWSIM.Interfaces;
 using DWSIM.Thermodynamics.PropertyPackages;
 using DWSIM.Thermodynamics.PropertyPackages.Auxiliary;
+using DWSIM.Thermodynamics.AdvancedEOS;
 using f = DWSIM.Interfaces.Enums.FlashSetting;
 
 namespace DWSIM.UI.Desktop.Avalonia;
@@ -32,13 +33,20 @@ public class PropertyPackageEditorWindow : Window
         "Peng-Robinson 1978 (PR78)", "Peng-Robinson / Lee-Kesler (PR/LK)",
         "Peng-Robinson-Stryjek-Vera 2 (PRSV2-M)",
         "Peng-Robinson-Stryjek-Vera 2 (PRSV2-VL)",
-        "Wilson"
+        "Wilson",
+        "PC-SAFT (with Association Support) (.NET Code)"
     };
 
     public PropertyPackageEditorWindow(IFlowsheet flowsheet, PropertyPackage pp)
     {
         _flowsheet = flowsheet;
         _pp = pp;
+
+        // A property package that does its own flashing (e.g. a CAPE-OPEN package) can arrive with an
+        // empty or partial FlashSettings dictionary. Backfill the defaults so the editor never throws a
+        // KeyNotFoundException reading a setting the package never populated.
+        foreach (var kv in DWSIM.Thermodynamics.PropertyPackages.Auxiliary.FlashAlgorithms.FlashAlgorithm.GetDefaultSettings())
+            if (!_pp.FlashSettings.ContainsKey(kv.Key)) _pp.FlashSettings[kv.Key] = kv.Value;
 
         Title = $"Edit '{pp.Tag}' ({pp.ComponentName})";
         Width = 820;
@@ -144,6 +152,9 @@ public class PropertyPackageEditorWindow : Window
             case "Wilson":
                 BuildWilson(panel, comps);
                 break;
+            case "PC-SAFT (with Association Support) (.NET Code)":
+                BuildPCSAFT(panel);
+                break;
         }
 
         return new ScrollViewer { Content = panel };
@@ -240,7 +251,7 @@ public class PropertyPackageEditorWindow : Window
             {
                 Text = comps[j],
                 FontWeight = FontWeight.SemiBold,
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
                 Margin = new Thickness(4, 2),
                 MaxWidth = 88,
                 TextTrimming = TextTrimming.CharacterEllipsis,
@@ -258,7 +269,7 @@ public class PropertyPackageEditorWindow : Window
             {
                 Text = comps[i],
                 FontWeight = FontWeight.SemiBold,
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
                 Margin = new Thickness(4, 2),
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -273,15 +284,15 @@ public class PropertyPackageEditorWindow : Window
                 Control cell;
                 if (c1 == c2 || !ipc[c1].ContainsKey(c2))
                 {
-                    cell = new TextBox { IsEnabled = false, FontSize = 11, Margin = new Thickness(1) };
+                    cell = new TextBox { IsEnabled = false, FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11), Margin = new Thickness(1) };
                 }
                 else
                 {
                     var d = ipc[c1][c2];
-                    var tb = new TextBox { Text = d.kij.ToString("N4"), FontSize = 11, Margin = new Thickness(1) };
+                    var tb = new TextBox { Text = d.kij.ToString("N4"), FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11), Margin = new Thickness(1) };
                     tb.LostFocus += (_, _) =>
                     {
-                        if (double.TryParse(tb.Text, NumberStyles.Any, CultureInfo.CurrentCulture, out var v))
+                        if (double.TryParse(tb.Text, NumberStyles.Float, CultureInfo.CurrentCulture, out var v))
                         {
                             tb.Foreground = Brushes.Black;
                             d.kij = v;
@@ -305,6 +316,151 @@ public class PropertyPackageEditorWindow : Window
             HorizontalScrollBarVisibility = global::Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = global::Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled
         });
+    }
+
+    // --- PC-SAFT (compound parameters incl. polymer m/M and association scheme, plus kij) ---
+    private void BuildPCSAFT(StackPanel panel)
+    {
+        var pp = (PCSAFT2PropertyPackage)_pp;
+        var comps = _flowsheet.SelectedCompounds.Values.ToList();
+
+        // Make sure every selected compound has a parameter record (mirrors the classic editor).
+        foreach (var cp in comps)
+            if (!pp.CompoundParameters.ContainsKey(cp.CAS_Number))
+                pp.CompoundParameters.Add(cp.CAS_Number,
+                    new PCSParam { compound = cp.Name, casno = cp.CAS_Number, mw = cp.Molar_Weight });
+
+        // ---- Compound parameters ----
+        panel.Children.Add(MakeHeader("Compound parameters"));
+
+        var grid = new Grid { Margin = new Thickness(0, 0, 0, 6) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));
+        for (int k = 0; k < 5; k++) grid.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(110)));
+
+        string[] heads = { "Compound", "Segments (m)", "σ (Å)", "ε/k (K)", "m/M (polymer)", "Assoc. scheme" };
+        grid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
+        for (int c = 0; c < heads.Length; c++)
+        {
+            var h = new TextBlock
+            {
+                Text = heads[c],
+                FontWeight = FontWeight.SemiBold,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
+                Margin = new Thickness(4, 2)
+            };
+            Grid.SetRow(h, 0);
+            Grid.SetColumn(h, c);
+            grid.Children.Add(h);
+        }
+
+        int row = 1;
+        foreach (var cp in comps)
+        {
+            var p = pp.CompoundParameters[cp.CAS_Number];
+            grid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
+
+            var nlbl = new TextBlock
+            {
+                Text = cp.Name,
+                VerticalAlignment = VerticalAlignment.Center,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
+                Margin = new Thickness(4, 2)
+            };
+            Grid.SetRow(nlbl, row);
+            Grid.SetColumn(nlbl, 0);
+            grid.Children.Add(nlbl);
+
+            AddParamCell(grid, row, 1, p.m, v => p.m = v);
+            AddParamCell(grid, row, 2, p.sigma, v => p.sigma = v);
+            AddParamCell(grid, row, 3, p.epsilon, v => p.epsilon = v);
+            AddParamCell(grid, row, 4, p.m_over_M, v => p.m_over_M = v);
+
+            var pcap = p;
+            var items = new[] { "", "2B", "4C", "4C/ETHER" };
+            var cb = new ComboBox { FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11), Margin = new Thickness(1), MinWidth = 100 };
+            foreach (var it in items) cb.Items.Add(it);
+            var cur = (pcap.scheme ?? "").Trim().ToUpperInvariant();
+            if (!items.Contains(cur)) cur = "";
+            cb.SelectedItem = cur;
+            cb.SelectionChanged += (_, _) => pcap.scheme = (cb.SelectedItem as string) ?? "";
+            Grid.SetRow(cb, row);
+            Grid.SetColumn(cb, 5);
+            grid.Children.Add(cb);
+
+            row++;
+        }
+
+        panel.Children.Add(new ScrollViewer
+        {
+            Content = grid,
+            HorizontalScrollBarVisibility = global::Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = global::Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled
+        });
+
+        panel.Children.Add(new TextBlock
+        {
+            Text = "For a polymer, set m/M (segments per gram) and leave Segments (m) at zero; the segment number becomes m/M x molar weight. The association scheme selects 2B, 4C, or the PEG-type 4C/ETHER, whose ether sites grow with molar mass.",
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(10),
+            Foreground = Brushes.Gray,
+            Margin = new Thickness(0, 2, 0, 8)
+        });
+
+        // ---- kij ----
+        panel.Children.Add(MakeHeader("Binary interaction parameters (kij)"));
+        EnsurePCSAFTPairs(comps, pp.InteractionParameters);
+        foreach (var c1 in comps)
+            foreach (var c2 in comps)
+            {
+                if (c1.CAS_Number == c2.CAS_Number) continue;
+                if (!pp.InteractionParameters.ContainsKey(c1.CAS_Number)) continue;
+                if (!pp.InteractionParameters[c1.CAS_Number].ContainsKey(c2.CAS_Number)) continue;
+                var d = pp.InteractionParameters[c1.CAS_Number][c2.CAS_Number];
+                panel.Children.Add(MakeTextBoxRow($"{c1.Name} / {c2.Name}  kij", d.kij, v => d.kij = v));
+            }
+    }
+
+    private static void EnsurePCSAFTPairs(List<ICompoundConstantProperties> comps,
+        Dictionary<string, Dictionary<string, PCSIP>> ip)
+    {
+        foreach (var c1 in comps)
+        {
+            if (!ip.ContainsKey(c1.CAS_Number)) ip.Add(c1.CAS_Number, new Dictionary<string, PCSIP>());
+            foreach (var c2 in comps)
+            {
+                if (c1.CAS_Number == c2.CAS_Number) continue;
+                bool fwd = ip[c1.CAS_Number].ContainsKey(c2.CAS_Number);
+                bool rev = ip.ContainsKey(c2.CAS_Number) && ip[c2.CAS_Number].ContainsKey(c1.CAS_Number);
+                if (!fwd && !rev)
+                    ip[c1.CAS_Number].Add(c2.CAS_Number,
+                        new PCSIP { casno1 = c1.CAS_Number, casno2 = c2.CAS_Number, compound1 = c1.Name, compound2 = c2.Name });
+            }
+        }
+    }
+
+    private static void AddParamCell(Grid grid, int row, int col, double value, Action<double> setter)
+    {
+        var tb = new TextBox
+        {
+            Text = value.ToString("G6", CultureInfo.CurrentCulture),
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
+            Margin = new Thickness(1)
+        };
+        tb.LostFocus += (_, _) =>
+        {
+            if (double.TryParse(tb.Text, NumberStyles.Float, CultureInfo.CurrentCulture, out var v))
+            {
+                tb.Foreground = Brushes.Black;
+                setter(v);
+            }
+            else
+            {
+                tb.Foreground = Brushes.Red;
+            }
+        };
+        Grid.SetRow(tb, row);
+        Grid.SetColumn(tb, col);
+        grid.Children.Add(tb);
     }
 
     // --- LKP ---
@@ -783,7 +939,7 @@ public class PropertyPackageEditorWindow : Window
             panel.Children.Add(new TextBlock
             {
                 Text = "No reaction sets defined. Add reactions via Simulation Settings first.",
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
                 Foreground = Brushes.Gray,
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 4)
@@ -793,7 +949,7 @@ public class PropertyPackageEditorWindow : Window
         panel.Children.Add(new TextBlock
         {
             Text = "These parameters control the isothermal-flash solver used by the electrolyte property package.",
-            FontSize = 10,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(10),
             Foreground = new SolidColorBrush(Color.Parse("#777")),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 8, 0, 0)
@@ -815,7 +971,7 @@ public class PropertyPackageEditorWindow : Window
         {
             Text = "Select the compounds which will be forcedly put into the solid phase.\n" +
                    "This setting works only with the Nested Loops SVLE (Eutetic) Flash Algorithm.",
-            FontSize = 10,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(10),
             Foreground = new SolidColorBrush(Color.Parse("#777")),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 8)
@@ -853,7 +1009,7 @@ public class PropertyPackageEditorWindow : Window
                    "Available variables: 'flowsheet' (the flowsheet), 'this' (the property package), " +
                    "'matstr' (the associated material stream), 'phase' (the current phase), " +
                    "'currval' (the current value), 'T' (K) and 'P' (Pa) of the material stream.",
-            FontSize = 10,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(10),
             Foreground = new SolidColorBrush(Color.Parse("#777")),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 8)
@@ -901,7 +1057,7 @@ public class PropertyPackageEditorWindow : Window
                     Text = "Phase / Property",
                     Width = 120,
                     VerticalAlignment = VerticalAlignment.Center,
-                    FontSize = 11
+                    FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11)
                 },
                 selector
             }
@@ -954,7 +1110,7 @@ public class PropertyPackageEditorWindow : Window
         var btn = new Button
         {
             Content = "Regress...",
-            FontSize = 11,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
             Padding = new Thickness(8, 2),
             VerticalAlignment = VerticalAlignment.Center
         };
@@ -990,7 +1146,7 @@ public class PropertyPackageEditorWindow : Window
     {
         Text = text,
         FontWeight = FontWeight.Bold,
-        FontSize = 12,
+        FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12),
         Margin = new Thickness(0, 10, 0, 4)
     };
 
@@ -1003,13 +1159,13 @@ public class PropertyPackageEditorWindow : Window
             Text = label,
             Width = 350,
             VerticalAlignment = VerticalAlignment.Center,
-            FontSize = 11
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11)
         };
 
-        var tb = new TextBox { Text = value.ToString("N4"), Width = 160, FontSize = 11 };
+        var tb = new TextBox { Text = value.ToString("N4"), Width = 160, FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11) };
         tb.LostFocus += (_, _) =>
         {
-            if (double.TryParse(tb.Text, NumberStyles.Any, CultureInfo.CurrentCulture, out var v))
+            if (double.TryParse(tb.Text, NumberStyles.Float, CultureInfo.CurrentCulture, out var v))
             {
                 tb.Foreground = Brushes.Black;
                 setter(v);
@@ -1034,10 +1190,10 @@ public class PropertyPackageEditorWindow : Window
             Text = label,
             Width = 350,
             VerticalAlignment = VerticalAlignment.Center,
-            FontSize = 11
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11)
         };
 
-        var tb = new TextBox { Text = value.ToString(), Width = 160, FontSize = 11 };
+        var tb = new TextBox { Text = value.ToString(), Width = 160, FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11) };
         tb.LostFocus += (_, _) =>
         {
             if (int.TryParse(tb.Text, out var v))
@@ -1065,10 +1221,10 @@ public class PropertyPackageEditorWindow : Window
             Text = label,
             Width = 350,
             VerticalAlignment = VerticalAlignment.Center,
-            FontSize = 11
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11)
         };
 
-        var cb = new ComboBox { Width = 220, FontSize = 11 };
+        var cb = new ComboBox { Width = 220, FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11) };
         foreach (var item in items) cb.Items.Add(item);
         if (selectedIndex >= 0 && selectedIndex < cb.Items.Count) cb.SelectedIndex = selectedIndex;
         cb.SelectionChanged += (_, _) => { if (cb.SelectedIndex >= 0) setter(cb.SelectedIndex); };
@@ -1093,7 +1249,7 @@ public class PropertyPackageEditorWindow : Window
             Content = text,
             IsChecked = isChecked,
             Margin = new Thickness(0, 2),
-            FontSize = 11
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11)
         };
         cb.IsCheckedChanged += (_, _) => setter(cb.IsChecked.GetValueOrDefault());
         return cb;

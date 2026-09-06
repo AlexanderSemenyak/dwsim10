@@ -146,9 +146,12 @@ public partial class SimulationSettingsWindow : Window
     // Parameterless ctor required by Avalonia's XAML compiler (designer-only).
     public SimulationSettingsWindow() : this(null!) { }
 
-    public SimulationSettingsWindow(IFlowsheet flowsheet)
+    private readonly Action? _refreshCanvas;
+
+    public SimulationSettingsWindow(IFlowsheet flowsheet, Action? refreshCanvas = null)
     {
         _flowsheet = flowsheet!;
+        _refreshCanvas = refreshCanvas;
         InitializeComponent();
         IconHelper.ApplyWindowIcon(this);
         if (flowsheet == null) return;
@@ -177,7 +180,7 @@ public partial class SimulationSettingsWindow : Window
     {
         _allCompoundRows.Clear();
 
-        var available = _flowsheet.AvailableCompounds?.Values.OrderBy(x => x.Name).ToList()
+        var available = _flowsheet.AvailableCompounds?.Values.OrderBy(x => x.ChemSepFamily).ToList()
                         ?? new List<ICompoundConstantProperties>();
 
         foreach (var compound in available)
@@ -187,10 +190,13 @@ public partial class SimulationSettingsWindow : Window
             _allCompoundRows.Add(row);
         }
 
-        // added ones first, as the WinForms grid sorts itself on load
-        _allCompoundRows.Sort((a, b) => a.Added == b.Added
-            ? string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase)
-            : b.Added.CompareTo(a.Added));
+        // added ones first (as the WinForms grid sorts itself on load); a stable partition keeps the
+        // ChemSep-family grouping and the database order within each family (the rows are already in that
+        // order from the stable OrderBy above, which List.Sort would scramble)
+        var reordered = _allCompoundRows.Where(r => r.Added)
+            .Concat(_allCompoundRows.Where(r => !r.Added)).ToList();
+        _allCompoundRows.Clear();
+        _allCompoundRows.AddRange(reordered);
 
         GridCompounds.ItemsSource = _compoundRows;
         FilterCompounds("");
@@ -422,7 +428,7 @@ public partial class SimulationSettingsWindow : Window
             IsReadOnly = true,
             HeadersVisibility = DataGridHeadersVisibility.Column,
             GridLinesVisibility = DataGridGridLinesVisibility.Horizontal,
-            FontSize = 11,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
             ItemsSource = rows
         };
         grid.Columns.Add(new DataGridTextColumn { Header = "Property", Binding = new global::Avalonia.Data.Binding("Property"), Width = new DataGridLength(230) });
@@ -707,6 +713,7 @@ public partial class SimulationSettingsWindow : Window
     private void PopulateBehavior()
     {
         ChkSkipEqCalcs.IsChecked = Options.SkipEquilibriumCalculationOnDefinedStreams;
+        CbColorTheme.SelectedIndex = Options.FlowsheetColorTheme;
         CbForcePhase.SelectedIndex = Options.ForceStreamPhase switch
         {
             ForcedPhase.Vapor => 1,
@@ -805,7 +812,7 @@ public partial class SimulationSettingsWindow : Window
                 Content = _flowsheet.GetTranslatedString(property),
                 Tag = property,
                 IsChecked = visible.Contains(property),
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
                 MinHeight = 0
             };
             item.IsCheckedChanged += (_, _) => ToggleVisibleProperty(item);
@@ -863,7 +870,7 @@ public partial class SimulationSettingsWindow : Window
             {
                 Content = name,
                 IsChecked = target.Contains(name),
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
                 MinHeight = 0
             };
             item.IsCheckedChanged += (_, _) =>
@@ -1019,6 +1026,13 @@ public partial class SimulationSettingsWindow : Window
         ChkSkipEqCalcs.IsCheckedChanged += (_, _) =>
         {
             if (!_loading) Options.SkipEquilibriumCalculationOnDefinedStreams = ChkSkipEqCalcs.IsChecked.GetValueOrDefault();
+        };
+        CbColorTheme.SelectionChanged += (_, _) =>
+        {
+            if (_loading) return;
+            Options.FlowsheetColorTheme = CbColorTheme.SelectedIndex;
+            // redraw the flowsheet so the new theme (e.g. Color Icons) applies immediately
+            _refreshCanvas?.Invoke();
         };
         CbForcePhase.SelectionChanged += (_, _) =>
         {

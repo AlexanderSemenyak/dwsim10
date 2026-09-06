@@ -1252,6 +1252,10 @@ public partial class FlowsheetView : UserControl
                             _spreadsheet.Loaded = true;
                             if (_spreadsheet.Grid.Worksheets.Count > 0)
                                 _spreadsheet.Grid.CurrentWorksheet = _spreadsheet.Grid.Worksheets[0];
+                            // Recalculate every worksheet once the sheets are loaded so a cell that
+                            // reads a property or cross-references another cell resolves on opening,
+                            // instead of showing the stale/zero value it was saved with until re-touched.
+                            _spreadsheet.EvaluateAll();
                         });
                     }
                 }
@@ -1412,15 +1416,11 @@ public partial class FlowsheetView : UserControl
             Dispatcher.UIThread.Post(() => LogList.Add(message, type, exceptionId));
     }
 
-    public void SetStatus(string text)
-    {
-        if (Dispatcher.UIThread.CheckAccess())
-            StatusLabel.Text = text;
-        else
-            Dispatcher.UIThread.Post(() => StatusLabel.Text = text);
-    }
+    // The bottom status bar (Ready / Zoom) was removed to give the canvas more room; these remain as
+    // no-ops so callers (zoom, status updates) do not have to change. Zoom is on the view toolbar.
+    public void SetStatus(string text) { }
 
-    public void SetZoom(float zoom) => ZoomLabel.Text = $"Zoom: {zoom * 100:F0}%";
+    public void SetZoom(float zoom) { }
 
     // -------------------------------------------------------------------------
     // Menu icons
@@ -1458,6 +1458,7 @@ public partial class FlowsheetView : UserControl
 
         // Dynamics
         IconHelper.Set(MenuDynamicsToggle, "⚡");
+        IconHelper.Set(MenuDynWizard,      "\U0001F9ED"); // compass
         IconHelper.Set(MenuDynManager,     "\U0001F4CA"); // chart
         IconHelper.Set(MenuDynIntegrator,  "⏱");     // stopwatch
         IconHelper.Set(MenuDynPIDTuning,   "\U0001F39B"); // control knobs
@@ -1480,6 +1481,7 @@ public partial class FlowsheetView : UserControl
         IconHelper.Set(MenuBalance,        "⚖");     // scales
         IconHelper.Set(MenuInspector,      "\U0001F50E"); // magnifying glass right
         IconHelper.Set(MenuCreateCompound, "\U0001F9EA"); // test tube
+        IconHelper.Set(MenuPolymerChar,    "\U0001F9EC"); // dna (polymer chains)
         IconHelper.Set(MenuScripts,        "\U0001F4DC"); // scroll
         IconHelper.Set(MenuReactions,      "⚗");     // alembic
         IconHelper.Set(MenuUOExtManager,   "\U0001F50C"); // plug
@@ -1888,6 +1890,11 @@ public partial class FlowsheetView : UserControl
             if (_flowsheet == null) { AppendLog("No simulation loaded."); return; }
             new AssayManagerWindow(_flowsheet).Show(HostWindow);
         };
+        MenuPolymerChar.Click += (_, _) =>
+        {
+            if (_flowsheet == null) { AppendLog("No simulation loaded."); return; }
+            new PolymerCharacterizationWindow(_flowsheet).Show(HostWindow);
+        };
         MenuBulkPseudos.Click += (_, _) =>
         {
             if (_flowsheet == null) { AppendLog("No simulation loaded."); return; }
@@ -1982,7 +1989,7 @@ public partial class FlowsheetView : UserControl
         MenuSimSettings.Click += async (_, _) =>
         {
             if (_flowsheet == null) { AppendLog("No simulation loaded."); return; }
-            var dlg = new SimulationSettingsWindow(_flowsheet);
+            var dlg = new SimulationSettingsWindow(_flowsheet, refreshCanvas: () => Canvas?.Refresh());
             await dlg.ShowDialog(HostWindow);
         };
 
@@ -2087,6 +2094,14 @@ public partial class FlowsheetView : UserControl
         {
             if (_flowsheet == null) { AppendLog("No simulation loaded."); return; }
             new PIDTuningWindow(_flowsheet).Show(HostWindow);
+        };
+        MenuDynWizard.Click += (_, _) =>
+        {
+            if (_flowsheet == null) { AppendLog("No simulation loaded."); return; }
+            var wizard = new DynamicsWizard(_flowsheet);
+            // The manager builds its lists once; anything the wizard creates needs it to reload.
+            wizard.OnApplied = () => DynManagerPanel?.Populate();
+            wizard.Show(HostWindow);
         };
 
         // --- Results menu ---
@@ -2526,7 +2541,7 @@ public partial class FlowsheetView : UserControl
                                     AcceptsReturn = true,
                                     TextWrapping = global::Avalonia.Media.TextWrapping.Wrap,
                                     FontFamily = new FontFamily("Consolas,Courier New,monospace"),
-                                    FontSize = 11
+                                    FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11)
                                 }
                             }
                         }
@@ -2863,19 +2878,31 @@ public partial class FlowsheetView : UserControl
 
                 var displayName = obj.GetDisplayName();
                 var category = ObjectClassToCategory(obj.ObjectClass);
-                // External unit operations (bio, refining, premium) reuse generic ObjectClass
-                // values (Reactors, Exchangers, Logical...). The classic palette
-                // (SimulationObjectsPanel) reroutes them to their own sections via the
-                // IsPremium/IsRefining/IsBio reflection flags; mirror that here so the
-                // Premium, Refining and Biochemical tabs appear.
-                try
+
+                // A third-party unit operation (loaded from unitops\, neither open nor Plus) is
+                // grouped under its own ProductName, or a shared "Third-Party" section when it
+                // does not override one. Otherwise fall through to the normal grouping below.
+                var thirdParty = DWSIM.SharedClasses.Utility.GetThirdPartyPaletteGroup(obj);
+                if (thirdParty.IsThirdParty)
                 {
-                    var t = obj.GetType();
-                    if (t.GetProperty("IsPremium")?.GetValue(obj) is bool p && p) category = "Premium";
-                    if (t.GetProperty("IsRefining")?.GetValue(obj) is bool r && r) category = "Refining";
-                    if (t.GetProperty("IsBio")?.GetValue(obj) is bool b && b) category = "Biochemical";
+                    category = string.IsNullOrEmpty(thirdParty.GroupName) ? "Third-Party" : thirdParty.GroupName;
                 }
-                catch { }
+                else
+                {
+                    // External unit operations (bio, refining, premium) reuse generic ObjectClass
+                    // values (Reactors, Exchangers, Logical...). The classic palette
+                    // (SimulationObjectsPanel) reroutes them to their own sections via the
+                    // IsPremium/IsRefining/IsBio reflection flags; mirror that here so the
+                    // Premium, Refining and Biochemical tabs appear.
+                    try
+                    {
+                        var t = obj.GetType();
+                        if (t.GetProperty("IsPremium")?.GetValue(obj) is bool p && p) category = "Premium";
+                        if (t.GetProperty("IsRefining")?.GetValue(obj) is bool r && r) category = "Refining";
+                        if (t.GetProperty("IsBio")?.GetValue(obj) is bool b && b) category = "Biochemical";
+                    }
+                    catch { }
+                }
                 byte[]? iconBytes = null;
                 try { iconBytes = obj.GetIconBitmapBytes(); } catch { }
                 string? tip = null;
@@ -2896,9 +2923,23 @@ public partial class FlowsheetView : UserControl
             }
         }
 
-        // Build collapsible sections for each category, in the classic palette order
+        // ChemSep-column shortcut under Columns (Windows only): a CAPE-OPEN unit operation preset to
+        // ChemSep, shown with the distillation-column icon - mirrors the classic WinForms palette
+        // (SimulationObjectsPanel). Inserting it routes to the engine's "ChemSep Column" AddObject case.
+        if (OperatingSystem.IsWindows() && _paletteCategories.TryGetValue("Columns", out var columnItems)
+            && columnItems.All(it => it.name != "ChemSep Column"))
+        {
+            var icon = columnItems.FirstOrDefault(it => it.name == "Distillation Column").icon;
+            columnItems.Add(("ChemSep Column", icon, "ChemSep Rigorous Separation Column (CAPE-OPEN)"));
+        }
+
+        // Build collapsible sections for each category, in the classic palette order, with any
+        // third-party product groups appended after the built-ins (alphabetical) and the shared
+        // "Third-Party" catch-all last.
+        var extras = _paletteCategories.Keys.Where(k => !CategoryOrder.Contains(k)).ToList();
         var orderedCats = CategoryOrder.Where(_paletteCategories.ContainsKey)
-            .Concat(_paletteCategories.Keys.Where(k => !CategoryOrder.Contains(k)));
+            .Concat(extras.Where(k => k != "Third-Party").OrderBy(k => k, StringComparer.CurrentCultureIgnoreCase))
+            .Concat(extras.Where(k => k == "Third-Party"));
         foreach (var cat in orderedCats)
         {
             var items = _paletteCategories[cat];
@@ -2907,25 +2948,25 @@ public partial class FlowsheetView : UserControl
             var arrowText = new TextBlock
             {
                 Text = "↓",  // down arrow = expanded
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
                 FontWeight = FontWeight.Bold,
                 Foreground = Brushes.SteelBlue,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(6, 0, 4, 0),
-                Width = 16
+                Width = DWSIM.UI.Shared.Avalonia.UiScale.Size(16)
             };
             var headerLabel = new TextBlock
             {
                 Text = cat,
                 FontWeight = FontWeight.SemiBold,
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11),
                 VerticalAlignment = VerticalAlignment.Center
             };
             var headerPanel = new StackPanel
             {
                 Orientation = global::Avalonia.Layout.Orientation.Horizontal,
                 Cursor = new Cursor(StandardCursorType.Hand),
-                Height = 30,
+                Height = DWSIM.UI.Shared.Avalonia.UiScale.Size(30),
             };
             // Theme-aware band: light in the light variant, dark in the dark one, so the
             // header text (which inherits the theme foreground) stays legible in both.
@@ -2946,7 +2987,7 @@ public partial class FlowsheetView : UserControl
                 var cell = new StackPanel
                 {
                     Orientation = global::Avalonia.Layout.Orientation.Vertical,
-                    Width = 90,
+                    Width = DWSIM.UI.Shared.Avalonia.UiScale.Size(90),
                     Margin = new Thickness(2, 4),
                     HorizontalAlignment = HorizontalAlignment.Center,
                     Cursor = new Cursor(StandardCursorType.Hand),
@@ -2968,8 +3009,8 @@ public partial class FlowsheetView : UserControl
                         iconCtrl = new Image
                         {
                             Source = bmp,
-                            Width = 40,
-                            Height = 40,
+                            Width = DWSIM.UI.Shared.Avalonia.UiScale.Size(40),
+                            Height = DWSIM.UI.Shared.Avalonia.UiScale.Size(40),
                             HorizontalAlignment = HorizontalAlignment.Center
                         };
                     }
@@ -2977,7 +3018,7 @@ public partial class FlowsheetView : UserControl
                     {
                         iconCtrl = new Border
                         {
-                            Width = 40, Height = 40,
+                            Width = DWSIM.UI.Shared.Avalonia.UiScale.Size(40), Height = DWSIM.UI.Shared.Avalonia.UiScale.Size(40),
                             Background = Brushes.LightGray,
                             HorizontalAlignment = HorizontalAlignment.Center
                         };
@@ -2987,7 +3028,7 @@ public partial class FlowsheetView : UserControl
                 {
                     iconCtrl = new Border
                     {
-                        Width = 40, Height = 40,
+                        Width = DWSIM.UI.Shared.Avalonia.UiScale.Size(40), Height = DWSIM.UI.Shared.Avalonia.UiScale.Size(40),
                         Background = Brushes.LightGray,
                         HorizontalAlignment = HorizontalAlignment.Center
                     };
@@ -2998,11 +3039,11 @@ public partial class FlowsheetView : UserControl
                 cell.Children.Add(new TextBlock
                 {
                     Text = name,
-                    FontSize = 10,
+                    FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(10),
                     TextAlignment = TextAlignment.Center,
                     TextWrapping = TextWrapping.Wrap,
                     HorizontalAlignment = HorizontalAlignment.Center,
-                    MaxWidth = 86
+                    MaxWidth = DWSIM.UI.Shared.Avalonia.UiScale.Size(86)
                 });
 
                 // Wire double-click to add object
@@ -3263,6 +3304,13 @@ public partial class FlowsheetView : UserControl
 
             return picked!;
         };
+
+        // The ChemSep-column shortcut: scan the registry for ChemSep's CAPE-OPEN object directly,
+        // without a picker (the WinForms wait-window path is not built here).
+        DWSIM.UnitOperations.UnitOperations.CapeOpenUO.ChemSepFinderOverride = () =>
+            DWSIM.UnitOperations.UnitOperations.CapeOpenUO
+                .SearchRegisteredUnitOperations(true)
+                .FirstOrDefault(x => (x.Name ?? string.Empty).ToLower().Contains("chemsep"))!;
     }
 
     // -------------------------------------------------------------------------
@@ -3496,7 +3544,7 @@ public partial class FlowsheetView : UserControl
         {
             Text = "Are you sure you want to close this simulation?\nUnsaved changes will be lost.",
             TextWrapping = global::Avalonia.Media.TextWrapping.Wrap,
-            FontSize = 13,
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(13),
             Margin = new Thickness(20, 20, 20, 0)
         });
 

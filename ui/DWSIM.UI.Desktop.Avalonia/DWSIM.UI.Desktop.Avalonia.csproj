@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -27,9 +27,11 @@
     <PackageReference Include="Dock.Avalonia.Themes.Fluent" />
     <PackageReference Include="Dock.Model.Avalonia" />
     <PackageReference Include="Dock.Serializer.Newtonsoft" />
-    <PackageReference Include="Flee" />
     <PackageReference Include="Newtonsoft.Json" />
     <PackageReference Include="SkiaSharp" />
+    <!-- ships the Python 3 standard library as lib/ in the publish, so a Python Script unit operation
+         and flowsheet scripts can import stdlib modules on every platform (issue #46) -->
+    <PackageReference Include="IronPython.StdLib" />
   </ItemGroup>
 
   <!-- Compile-time only: the material stream and the property packages implement the CAPE-OPEN
@@ -44,6 +46,7 @@
   <ItemGroup>
     <ProjectReference Include="..\DWSIM.UI.Desktop.Editors.Avalonia\DWSIM.UI.Desktop.Editors.Avalonia.csproj" />
     <ProjectReference Include="..\DWSIM.UI.Shared.Avalonia\DWSIM.UI.Shared.Avalonia.csproj" />
+    <ProjectReference Include="..\..\engine\DWSIM.Automation.DynamicRunner\DWSIM.Automation.DynamicRunner.csproj" />
     <ProjectReference Include="..\..\engine\DWSIM.Drawing.SkiaSharp\DWSIM.Drawing.SkiaSharp.vbproj" />
     <ProjectReference Include="..\..\engine\DWSIM.DynamicsManager\DWSIM.DynamicsManager.vbproj" />
     <ProjectReference Include="..\..\engine\DWSIM.ExtensionMethods\DWSIM.ExtensionMethods.vbproj" />
@@ -59,6 +62,7 @@
     <ProjectReference Include="..\..\engine\DWSIM.SharedClasses\DWSIM.SharedClasses.vbproj" />
     <ProjectReference Include="..\..\engine\DWSIM.SharedClasses.DataRegression\DWSIM.SharedClasses.DataRegression.vbproj" />
     <ProjectReference Include="..\..\engine\DWSIM.Thermodynamics\DWSIM.Thermodynamics.vbproj" />
+    <ProjectReference Include="..\..\engine\DWSIM.Thermodynamics.AdvancedEOS.PCSAFT\DWSIM.Thermodynamics.AdvancedEOS.PCSAFT2.vbproj" />
     <ProjectReference Include="..\..\engine\DWSIM.Thermodynamics.Databases.ChEDLThermoLink\DWSIM.Thermodynamics.Databases.ChEDLThermoLink.vbproj" />
     <ProjectReference Include="..\..\engine\DWSIM.Thermodynamics.Databases.ChemeoLink\DWSIM.Thermodynamics.Databases.ChemeoLink.vbproj" />
     <ProjectReference Include="..\..\engine\DWSIM.Thermodynamics.Databases.KDBLink\DWSIM.Thermodynamics.Databases.KDBLink.vbproj" />
@@ -74,6 +78,11 @@
   <ItemGroup>
     <AvaloniaResource Include="Assets\dwsim.ico" />
     <AvaloniaResource Include="Assets\DWSIM_splash_v10.png" />
+    <!-- Symbol/emoji fonts (SIL OFL) bundled as glyph-icon fallbacks so the toolbar and palette icons
+         render on Linux, where a stock install often has no font covering them (issue #56). -->
+    <AvaloniaResource Include="Assets\Fonts\NotoSansSymbols2-Regular.ttf" />
+    <AvaloniaResource Include="Assets\Fonts\NotoEmoji-Regular.ttf" />
+    <None Include="Assets\Fonts\OFL.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

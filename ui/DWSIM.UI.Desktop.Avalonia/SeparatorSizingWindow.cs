@@ -7,7 +7,6 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using DWSIM.Interfaces;
 using DWSIM.Interfaces.Enums.GraphicObjects;
-using DWSIM.Thermodynamics.Streams;
 using DWSIM.Thermodynamics.Utilities.Sizing;
 using DWSIM.UI.Shared.Avalonia;
 using cv = DWSIM.SharedClasses.SystemsOfUnits.Converter;
@@ -29,8 +28,8 @@ public sealed class SeparatorSizingWindow : Window
 
     private readonly SeparatorSizingInput _input = new();
     private readonly StackPanel _results = new() { Spacing = 2, Margin = new Thickness(8, 4, 8, 4) };
-    private readonly TextBlock _feed = new() { FontSize = 11, TextWrapping = TextWrapping.Wrap };
-    private readonly TextBlock _status = new() { FontSize = 11, Opacity = 0.85, TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _feed = new() { FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11), TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _status = new() { FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11), Opacity = 0.85, TextWrapping = TextWrapping.Wrap };
 
     public SeparatorSizingWindow(IFlowsheet flowsheet)
     {
@@ -116,25 +115,11 @@ public sealed class SeparatorSizingWindow : Window
                                  x.GraphicObject.Tag == (string)_vessels.SelectedItem!);
         if (vessel == null) { _status.Text = "Separator not found."; return; }
 
-        MaterialStream inlet, vapor, liquid;
-        try
+        if (!SeparatorSizing.ReadStreams(_flowsheet, vessel, _input))
         {
-            var go = vessel.GraphicObject;
-            inlet = (MaterialStream)_flowsheet.SimulationObjects[go.InputConnectors[0].AttachedConnector.AttachedFrom.Name];
-            vapor = (MaterialStream)_flowsheet.SimulationObjects[go.OutputConnectors[0].AttachedConnector.AttachedTo.Name];
-            liquid = (MaterialStream)_flowsheet.SimulationObjects[go.OutputConnectors[1].AttachedConnector.AttachedTo.Name];
-        }
-        catch
-        {
-            _status.Text = "Connect the separator inlet and both outlets before sizing it.";
+            _status.Text = "Connect the separator inlet, the gas outlet and the liquid outlet before sizing it.";
             return;
         }
-
-        _input.LiquidDensity = liquid.Phases[0].Properties.density.GetValueOrDefault();
-        _input.VaporDensity = vapor.Phases[0].Properties.density.GetValueOrDefault();
-        _input.InletDensity = inlet.Phases[0].Properties.density.GetValueOrDefault();
-        _input.LiquidVolumetricFlow = liquid.Phases[0].Properties.volumetric_flow.GetValueOrDefault();
-        _input.VaporVolumetricFlow = vapor.Phases[0].Properties.volumetric_flow.GetValueOrDefault();
 
         if (_input.VaporDensity <= 0 || _input.LiquidDensity <= 0)
         {

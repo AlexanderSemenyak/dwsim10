@@ -298,49 +298,7 @@ Namespace PropertyPackages.Auxiliary
             coeff(2) = BG - 1
             coeff(3) = 1
 
-            Dim temp1 = Poly_Roots(coeff)
-            Dim tv = 0.0#
-            Dim ZV, tv2 As Double
-
-            If temp1(0, 0) > temp1(1, 0) Then
-                tv = temp1(1, 0)
-                temp1(1, 0) = temp1(0, 0)
-                temp1(0, 0) = tv
-                tv2 = temp1(1, 1)
-                temp1(1, 1) = temp1(0, 1)
-                temp1(0, 1) = tv2
-            End If
-            If temp1(0, 0) > temp1(2, 0) Then
-                tv = temp1(2, 0)
-                temp1(2, 0) = temp1(0, 0)
-                temp1(0, 0) = tv
-                tv2 = temp1(2, 1)
-                temp1(2, 1) = temp1(0, 1)
-                temp1(0, 1) = tv2
-            End If
-            If temp1(1, 0) > temp1(2, 0) Then
-                tv = temp1(2, 0)
-                temp1(2, 0) = temp1(1, 0)
-                temp1(1, 0) = tv
-                tv2 = temp1(2, 1)
-                temp1(2, 1) = temp1(1, 1)
-                temp1(1, 1) = tv2
-            End If
-
-            ZV = temp1(2, 0)
-            If temp1(2, 1) <> 0 Then
-                ZV = temp1(1, 0)
-                If temp1(1, 1) <> 0 Then
-                    ZV = temp1(0, 0)
-                End If
-            End If
-
-            Z_PR = 0
-            If TIPO = "L" Then
-                Z_PR = temp1(0, 0)
-            ElseIf TIPO = "V" Then
-                Z_PR = temp1(2, 0)
-            End If
+            Z_PR = SelectZ(coeff, BG, TIPO = "L")
 
             IObj?.Paragraphs.Add(String.Format("<math_inline>Z</math_inline>: {0}", Z_PR))
 
@@ -378,32 +336,7 @@ Namespace PropertyPackages.Auxiliary
             coeff(2) = BG1 - 1
             coeff(3) = 1
 
-            Dim temp1 = Poly_Roots(coeff)
-            Dim tv = 0.0#
-
-            If temp1(0, 0) > temp1(1, 0) Then
-                tv = temp1(1, 0)
-                temp1(1, 0) = temp1(0, 0)
-                temp1(0, 0) = tv
-            End If
-            If temp1(0, 0) > temp1(2, 0) Then
-                tv = temp1(2, 0)
-                temp1(2, 0) = temp1(0, 0)
-                temp1(0, 0) = tv
-            End If
-            If temp1(1, 0) > temp1(2, 0) Then
-                tv = temp1(2, 0)
-                temp1(2, 0) = temp1(1, 0)
-                temp1(1, 0) = tv
-            End If
-
-            Dim Z = 0.0#
-
-            If TIPO = "L" Then
-                Z = temp1(0, 0)
-            ElseIf TIPO = "V" Then
-                Z = temp1(2, 0)
-            End If
+            Dim Z = SelectZ(coeff, BG1, TIPO = "L")
 
             Dim V = 0.0#
             If TIPO = "L" Then
@@ -1268,6 +1201,22 @@ Namespace PropertyPackages.ThermoPlugs
                 Z = _zarray(_mingz(0))
             End If
 
+            ' Poling, Grens and Prausnitz (1981): when a vapour is requested but its compressibility
+            ' root is spurious (fails the vapour criterion 0.9/P < beta < 3/P), regenerate the vapour
+            ' at a reduced pressure where a real vapour root exists, so the fugacity coefficient stays
+            ' physical and the K-values do not collapse to the trivial solution near the critical point.
+            If phase = 1 Then
+                Dim betav As Double = PGP_Beta(Z, T, P, aml, bml)
+                If betav <= 0.9 / P OrElse betav >= 3.0 / P Then
+                    Dim Zx, AGx, BGx As Double
+                    If PGP_VaporRootReducingP(T, P, aml, bml, Zx, AGx, BGx) Then
+                        Z = Zx
+                        AG = AGx
+                        BG = BGx
+                    End If
+                End If
+            End If
+
             IObj?.Paragraphs.Add(String.Format("<math_inline>Z</math_inline>: {0}", Z))
 
             Dim t1, t2, t3, t4, t5 As Double
@@ -1562,40 +1511,7 @@ Namespace PropertyPackages.ThermoPlugs
             coeff(2) = BG - 1
             coeff(3) = 1
 
-            Dim temp1 = Poly_Roots(coeff)
-            Dim tv = 0.0#
-            Dim tv2 As Double
-
-            Dim result As New List(Of Double)
-
-            If temp1(0, 0) > temp1(1, 0) Then
-                tv = temp1(1, 0)
-                temp1(1, 0) = temp1(0, 0)
-                temp1(0, 0) = tv
-                tv2 = temp1(1, 1)
-                temp1(1, 1) = temp1(0, 1)
-                temp1(0, 1) = tv2
-            End If
-            If temp1(0, 0) > temp1(2, 0) Then
-                tv = temp1(2, 0)
-                temp1(2, 0) = temp1(0, 0)
-                temp1(0, 0) = tv
-                tv2 = temp1(2, 1)
-                temp1(2, 1) = temp1(0, 1)
-                temp1(0, 1) = tv2
-            End If
-            If temp1(1, 0) > temp1(2, 0) Then
-                tv = temp1(2, 0)
-                temp1(2, 0) = temp1(1, 0)
-                temp1(1, 0) = tv
-                tv2 = temp1(2, 1)
-                temp1(2, 1) = temp1(1, 1)
-                temp1(1, 1) = tv2
-            End If
-
-            If temp1(0, 1) = 0.0# And temp1(0, 0) > 0.0# Then result.Add(temp1(0, 0))
-            If temp1(1, 1) = 0.0# And temp1(1, 0) > 0.0# Then result.Add(temp1(1, 0))
-            If temp1(2, 1) = 0.0# And temp1(2, 0) > 0.0# Then result.Add(temp1(2, 0))
+            Dim result = ValidZRoots(coeff, BG)
 
             IObj?.Paragraphs.Add(String.Format("Found {0} roots for the cubic equation.", result.Count))
             For Each item In result
@@ -1623,48 +1539,7 @@ Namespace PropertyPackages.ThermoPlugs
             coeff(2) = BG - 1
             coeff(3) = 1
 
-            Dim temp1 = Poly_Roots(coeff)
-            Dim tv = 0.0#
-            Dim ZV, tv2 As Double
-
-            Dim result As New List(Of Double)
-
-            If temp1(0, 0) > temp1(1, 0) Then
-                tv = temp1(1, 0)
-                temp1(1, 0) = temp1(0, 0)
-                temp1(0, 0) = tv
-                tv2 = temp1(1, 1)
-                temp1(1, 1) = temp1(0, 1)
-                temp1(0, 1) = tv2
-            End If
-            If temp1(0, 0) > temp1(2, 0) Then
-                tv = temp1(2, 0)
-                temp1(2, 0) = temp1(0, 0)
-                temp1(0, 0) = tv
-                tv2 = temp1(2, 1)
-                temp1(2, 1) = temp1(0, 1)
-                temp1(0, 1) = tv2
-            End If
-            If temp1(1, 0) > temp1(2, 0) Then
-                tv = temp1(2, 0)
-                temp1(2, 0) = temp1(1, 0)
-                temp1(1, 0) = tv
-                tv2 = temp1(2, 1)
-                temp1(2, 1) = temp1(1, 1)
-                temp1(1, 1) = tv2
-            End If
-
-            ZV = temp1(2, 0)
-            If temp1(2, 1) <> 0 Then
-                ZV = temp1(1, 0)
-                If temp1(1, 1) <> 0 Then
-                    ZV = temp1(0, 0)
-                End If
-            End If
-
-            If temp1(0, 1) = 0.0# And temp1(0, 0) > 0.0# Then result.Add(temp1(0, 0))
-            If temp1(1, 1) = 0.0# And temp1(1, 0) > 0.0# Then result.Add(temp1(1, 0))
-            If temp1(2, 1) = 0.0# And temp1(2, 0) > 0.0# Then result.Add(temp1(2, 0))
+            Dim result = ValidZRoots(coeff, BG)
 
             If result.Count = 0 Then
                 Throw New Exception("PR EOS: unable to calculate the compressibility factor at these conditions" &
@@ -1673,6 +1548,51 @@ Namespace PropertyPackages.ThermoPlugs
 
             Return result
 
+        End Function
+
+        ''' <summary>
+        ''' Isothermal compressibility of a Peng-Robinson phase, beta = -(1/V)(dV/dP)_T, in Pa^-1,
+        ''' from the analytical pressure derivative. Diagnoses a spurious compressibility root
+        ''' (Poling, Grens and Prausnitz, Ind. Eng. Chem. Process Des. Dev. 1981, 20, 127).
+        ''' </summary>
+        Shared Function PGP_Beta(Z As Double, T As Double, P As Double, am As Double, bm As Double) As Double
+            Dim R As Double = 8.314
+            Dim V As Double = Z * R * T / P
+            Dim D As Double = V * V + 2.0 * bm * V - bm * bm
+            Dim dPdV As Double = -R * T / ((V - bm) ^ 2) + am * (2.0 * V + 2.0 * bm) / (D * D)
+            If dPdV = 0.0 Then Return Double.MaxValue
+            Return -1.0 / (V * dPdV)
+        End Function
+
+        ''' <summary>
+        ''' Finds an acceptable vapour compressibility root by reducing the pressure until the
+        ''' isothermal compressibility satisfies the vapour criterion 0.9/P &lt; beta &lt; 3/P
+        ''' (Poling, Grens and Prausnitz, 1981, eq 4). The original pressure is kept for the
+        ''' equilibrium, since pressure barely affects the vapour fugacity coefficient.
+        ''' </summary>
+        Shared Function PGP_VaporRootReducingP(T As Double, P As Double, am As Double, bm As Double,
+                                               ByRef Zout As Double, ByRef AGout As Double, ByRef BGout As Double) As Boolean
+            Dim R As Double = 8.314
+            Dim Pt As Double = P
+            For it As Integer = 1 To 60
+                Pt = Pt * 0.75
+                If Pt < 1.0 Then Exit For
+                Dim AGt As Double = am * Pt / (R * T) ^ 2
+                Dim BGt As Double = bm * Pt / (R * T)
+                Dim roots As List(Of Double)
+                Try
+                    roots = CalcZ2(AGt, BGt)
+                Catch
+                    Continue For
+                End Try
+                Dim Zt As Double = roots.Max
+                Dim betat As Double = PGP_Beta(Zt, T, Pt, am, bm)
+                If betat > 0.9 / Pt AndAlso betat < 3.0 / Pt Then
+                    Zout = Zt : AGout = AGt : BGout = BGt
+                    Return True
+                End If
+            Next
+            Return False
         End Function
 
         Public Overrides Function PhaseType(ByVal T As Double, ByVal P As Double, ByVal Vx As Array, ByVal VKij As Object, ByVal VTc As Array, ByVal VPc As Array, ByVal Vw As Array, Optional ByVal otherargs As Object = Nothing)

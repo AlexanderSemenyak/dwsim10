@@ -521,6 +521,14 @@ Namespace PropertyPackages
 
         Public Overridable ReadOnly Property ImplementsAnalyticalDerivatives As Boolean = False
 
+        ''' <summary>
+        ''' When True, the liquid-liquid flash converges the split by minimizing the two-phase Gibbs energy
+        ''' (descent), rather than by successive substitution / a residual-norm Newton. Needed for packages
+        ''' whose miscibility gap is shallow enough that the ordinary methods collapse onto the trivial
+        ''' solution - e.g. a polymer in PC-SAFT.
+        ''' </summary>
+        Public Overridable ReadOnly Property UsesGibbsMinimizationForLLE As Boolean = False
+
         Public Overridable ReadOnly Property IsFunctional As Boolean = True Implements IPropertyPackage.IsFunctional
 
         Public Overridable ReadOnly Property ShouldUseKvalueMethod2 As Boolean = False Implements IPropertyPackage.ShouldUseKvalueMethod2
@@ -1477,64 +1485,48 @@ Namespace PropertyPackages
             IObj?.Paragraphs.Add(String.Format("Phase 2 composition: {0}", Vy.ToMathArrayString()))
             IObj?.Paragraphs.Add(String.Format("Calculation Type: {0}", type))
 
-            Dim fugvap As Double() = Nothing
-            Dim fugliq As Double() = Nothing
+            Dim n As Integer = Vx.Length - 1
+            Dim i As Integer
+            Dim K(n) As Double
+
+            Dim st2 As State = If(type = "LV", State.Vapor, State.Liquid)
 
             If OverrideKvalFugCoeff Then
 
                 IObj?.Paragraphs.Add(String.Format("Fugacity coefficient calculation overriden by user. Calling user-defined functions..."))
 
-                fugliq = KvalFugacityCoefficientOverride.Invoke(Vx, T, P, State.Liquid, Me)
-                If type = "LV" Then
-                    fugvap = KvalFugacityCoefficientOverride.Invoke(Vy, T, P, State.Vapor, Me)
-                Else ' LL
-                    fugvap = KvalFugacityCoefficientOverride.Invoke(Vy, T, P, State.Liquid, Me)
-                End If
+                Dim fugliq = KvalFugacityCoefficientOverride.Invoke(Vx, T, P, State.Liquid, Me)
+                Dim fugvap = KvalFugacityCoefficientOverride.Invoke(Vy, T, P, st2, Me)
+                K = fugliq.DivideY(fugvap)
 
             Else
+
+                ' K from LOG fugacity coefficients: K = exp(ln phi_L - ln phi_V). Mathematically the same
+                ' as phi_L/phi_V for a normal package, but stays finite when a coefficient underflows to
+                ' zero (a high segment-number polymer), where phi_L/phi_V would be 0/0 = NaN and break the
+                ' Rachford-Rice loop.
+                Dim lnfugliq As Double() = Nothing
+                Dim lnfugvap As Double() = Nothing
 
                 IObj?.SetCurrent()
 
                 If Settings.EnableParallelProcessing Then
-
-                    Dim t1 = Task.Run(Sub() fugliq = Me.DW_CalcFugCoeff(Vx, T, P, State.Liquid))
-
-                    Dim t2 = Task.Run(Sub()
-                                          If type = "LV" Then
-                                              fugvap = Me.DW_CalcFugCoeff(Vy, T, P, State.Vapor)
-                                          Else ' LL
-                                              fugvap = Me.DW_CalcFugCoeff(Vy, T, P, State.Liquid)
-                                          End If
-                                      End Sub)
-
+                    Dim t1 = Task.Run(Sub() lnfugliq = Me.DW_CalcLnFugCoeff(Vx, T, P, State.Liquid))
+                    Dim t2 = Task.Run(Sub() lnfugvap = Me.DW_CalcLnFugCoeff(Vy, T, P, st2))
                     Task.WaitAll(t1, t2)
-
                 Else
-
-                    fugliq = Me.DW_CalcFugCoeff(Vx, T, P, State.Liquid)
-
+                    lnfugliq = Me.DW_CalcLnFugCoeff(Vx, T, P, State.Liquid)
                     IObj?.SetCurrent()
-
-                    If type = "LV" Then
-                        fugvap = Me.DW_CalcFugCoeff(Vy, T, P, State.Vapor)
-                    Else ' LL
-                        fugvap = Me.DW_CalcFugCoeff(Vy, T, P, State.Liquid)
-                    End If
-
+                    lnfugvap = Me.DW_CalcLnFugCoeff(Vy, T, P, st2)
                 End If
+
+                For i = 0 To n
+                    K(i) = Math.Exp(lnfugliq(i) - lnfugvap(i))
+                Next
 
             End If
 
             IObj?.Paragraphs.Add(String.Format("<h2>Intermediate Calculated Parameters</h2>"))
-
-            IObj?.Paragraphs.Add(String.Format("Phase 1 fugacity coefficients: {0}", fugliq.ToMathArrayString()))
-            IObj?.Paragraphs.Add(String.Format("Phase 2 fugacity coefficients: {0}", fugvap.ToMathArrayString()))
-
-            Dim n As Integer = fugvap.Length - 1
-            Dim i As Integer
-            Dim K(n) As Double
-
-            K = fugliq.DivideY(fugvap)
 
             If Double.IsNaN(K.SumY) Or Double.IsInfinity(K.SumY) Or K.SumY = 0.0# Then
                 Dim cprops = DW_GetConstantProperties()
@@ -1780,6 +1772,28 @@ Namespace PropertyPackages
         Public MustOverride Function DW_CalcFugCoeff(ByVal Vx As Array, ByVal T As Double, ByVal P As Double, ByVal st As State) As Double()
 
         ''' <summary>
+        ''' Calculates the natural logarithm of the fugacity coefficients. The default takes the log of
+        ''' DW_CalcFugCoeff, reproducing the historical -500 sentinel for a zero coefficient. Packages
+        ''' whose coefficient can underflow to zero (e.g. a high segment-number polymer in PC-SAFT,
+        ''' whose ln is on the order of -1e3) must override this to return the log directly, so the
+        ''' stability test and phase-split estimates keep the true chemical potential.
+        ''' </summary>
+        Public Overridable Function DW_CalcLnFugCoeff(ByVal Vx As Array, ByVal T As Double, ByVal P As Double, ByVal st As State) As Double()
+            Dim fc = DW_CalcFugCoeff(Vx, T, P, st)
+            Dim ln(fc.Length - 1) As Double
+            For i As Integer = 0 To fc.Length - 1
+                If fc(i) > 0.0# Then
+                    ln(i) = Math.Log(fc(i))
+                ElseIf fc(i) < 0.0# Then
+                    ln(i) = Math.Log(Math.Abs(fc(i)))
+                Else
+                    ln(i) = -500.0
+                End If
+            Next
+            Return ln
+        End Function
+
+        ''' <summary>
         ''' Calculates fugacity coefficients for the specified composition at the specified conditions.
         ''' </summary>
         ''' <param name="Vz">Vector of doubles containing the molar composition of the mixture.</param>
@@ -1834,6 +1848,20 @@ Namespace PropertyPackages
 
             Dim Vz = RET_VMOL(Phase.Mixture)
 
+            ' A component present at exactly zero mole fraction makes the critical Hessian singular
+            ' (its ln(n) / 1/n terms blow up), so the determinant and criticality functions come back
+            ' NaN and the solver returns a garbage point. A trace amount has no measurable effect on
+            ' the critical point (a fraction of 1e-4 already reproduces it), so floor the zero
+            ' fractions to a tiny value and renormalize.
+            Dim vzsum As Double = 0.0
+            For iz As Integer = 0 To Vz.Length - 1
+                If Vz(iz) < 0.0001 Then Vz(iz) = 0.0001
+                vzsum += Vz(iz)
+            Next
+            For jz As Integer = 0 To Vz.Length - 1
+                Vz(jz) /= vzsum
+            Next
+
             Dim VTc = RET_VTC()
             Dim VPc = RET_VPC()
 
@@ -1861,6 +1889,148 @@ Namespace PropertyPackages
             Return gm.CriticalPoint(Vz, V0, T0)
 
         End Function
+
+        ''' <summary>
+        ''' Puts the current material stream into the state a flash result describes, without running the
+        ''' flash: everything <see cref="DW_CalcEquilibrium"/> does after its own flash call returns.
+        '''
+        ''' A caller that has already flashed a state has no reason to flash it again to record it. The pipe
+        ''' did exactly that at every increment: its energy balance flashed at the outlet pressure and
+        ''' enthalpy, kept only the temperature, and then set the stream to that same pressure and enthalpy
+        ''' and asked it to flash. This exists so the second flash can be dropped, and it lives next to
+        ''' <see cref="DW_CalcEquilibrium"/> so the two cannot drift apart.
+        ''' </summary>
+        Public Sub DW_ApplyFlashResult(result As Interfaces.IFlashCalculationResult, T As Double, P As Double, H As Double)
+
+            Dim ms = Me.CurrentMaterialStream
+            If ms Is Nothing OrElse result Is Nothing Then Exit Sub
+
+            Dim xv = result.GetVaporPhaseMoleFraction()
+            Dim xl = result.GetLiquidPhase1MoleFraction()
+            Dim xl2 = result.GetLiquidPhase2MoleFraction()
+            Dim xs = result.GetSolidPhaseMoleFraction()
+
+            Dim Vy = result.GetVaporPhaseMoleFractions()
+            Dim Vx = result.GetLiquidPhase1MoleFractions()
+            Dim Vx2 = result.GetLiquidPhase2MoleFractions()
+            Dim Vs = result.GetSolidPhaseMoleFractions()
+
+            DW_ApplyPhaseSplit(xv, xl, xl2, xs, Vy, Vx, Vx2, Vs)
+
+            'the fugacity coefficients and the partial pressures that go with them: nothing in the property
+            'routines reads these, but they are part of the state the flash leaves behind and a later caller
+            'may
+            Dim FCL = Me.DW_CalcFugCoeff(Vx, T, P, State.Liquid)
+            Dim FCL2 = Me.DW_CalcFugCoeff(Vx2, T, P, State.Liquid)
+            Dim FCV = Me.DW_CalcFugCoeff(Vy, T, P, State.Vapor)
+            Dim FCS = Me.DW_CalcFugCoeff(Vs, T, P, State.Solid)
+
+            DW_WritePhaseFugacities(3, Vx, FCL, P)
+            DW_WritePhaseFugacities(4, Vx2, FCL2, P)
+            DW_WritePhaseFugacities(2, Vy, FCV, P)
+            DW_WritePhaseFugacities(7, Vs, FCS, 0.0)
+
+            Dim SM, SV, SL, SL2, SS As Double
+            If xl <> 0 Then SL = Me.DW_CalcEntropy(Vx, T, P, State.Liquid)
+            If xl2 <> 0 Then SL2 = Me.DW_CalcEntropy(Vx2, T, P, State.Liquid)
+            If xv <> 0 Then SV = Me.DW_CalcEntropy(Vy, T, P, State.Vapor)
+            If xs <> 0 AndAlso T <> 298.15 Then
+                Dim constprops As New List(Of Interfaces.ICompoundConstantProperties)
+                For Each su As Interfaces.ICompound In ms.Phases(0).Compounds.Values
+                    constprops.Add(su.ConstantProperties)
+                Next
+                SS = Me.DW_CalcSolidEnthalpy(T, Vs, constprops) / (T - 298.15)
+            End If
+
+            SM = ms.Phases(4).Properties.massfraction.GetValueOrDefault * SL2 +
+                 ms.Phases(3).Properties.massfraction.GetValueOrDefault * SL +
+                 ms.Phases(2).Properties.massfraction.GetValueOrDefault * SV +
+                 ms.Phases(7).Properties.massfraction.GetValueOrDefault * SS
+
+            ms.Phases(0).Properties.temperature = T
+            ms.Phases(0).Properties.pressure = P
+            ms.Phases(0).Properties.enthalpy = H
+            ms.Phases(0).Properties.entropy = SM
+
+            ms.AtEquilibrium = True
+
+        End Sub
+
+        ''' <summary>Fugacity coefficients, partial pressures and the zeroed activity terms of one phase.</summary>
+        Private Sub DW_WritePhaseFugacities(phaseindex As Integer, x As Double(), fc As Double(), P As Double)
+
+            If x Is Nothing OrElse fc Is Nothing Then Exit Sub
+
+            Dim i As Integer = 0
+            For Each subst As Interfaces.ICompound In Me.CurrentMaterialStream.Phases(phaseindex).Compounds.Values
+                If i >= x.Length OrElse i >= fc.Length Then Exit For
+                subst.FugacityCoeff = fc(i)
+                subst.ActivityCoeff = 0
+                subst.PartialVolume = 0
+                subst.PartialPressure = x(i) * fc(i) * P
+                i += 1
+            Next
+
+        End Sub
+
+        ''' <summary>
+        ''' Writes a phase split computed elsewhere into the current material stream, without flashing.
+        '''
+        ''' This is the part of <see cref="DW_CalcEquilibrium"/> that follows the flash call: the molar
+        ''' fraction of each phase, the composition of each phase, and the mass fractions that follow from
+        ''' them. It is here so that a caller which already knows the answer, because it cached it or read it
+        ''' off a table, can put the stream into that state and then ask for properties alone.
+        '''
+        ''' Fugacity coefficients, activity coefficients and partial pressures are NOT written, since the
+        ''' property routines do not read them. A caller that needs those has to run the real flash.
+        ''' </summary>
+        Public Sub DW_ApplyPhaseSplit(xv As Double, xl As Double, xl2 As Double, xs As Double,
+                                      Vy As Double(), Vx As Double(), Vx2 As Double(), Vs As Double())
+
+            Dim ms = Me.CurrentMaterialStream
+            If ms Is Nothing Then Exit Sub
+
+            ms.Phases(3).Properties.molarfraction = xl
+            ms.Phases(4).Properties.molarfraction = xl2
+            ms.Phases(2).Properties.molarfraction = xv
+            ms.Phases(7).Properties.molarfraction = xs
+
+            DW_WritePhaseComposition(3, Vx)
+            DW_WritePhaseComposition(4, Vx2)
+            DW_WritePhaseComposition(2, Vy)
+            DW_WritePhaseComposition(7, Vs)
+
+            Dim mml = xl * Me.AUX_MMM(Phase.Liquid1)
+            Dim mml2 = xl2 * Me.AUX_MMM(Phase.Liquid2)
+            Dim mmv = xv * Me.AUX_MMM(Phase.Vapor)
+            Dim mms = xs * Me.AUX_MMM(Phase.Solid)
+            Dim mmt = mml + mml2 + mmv + mms
+
+            If mmt > 0.0 Then
+                ms.Phases(3).Properties.massfraction = mml / mmt
+                ms.Phases(4).Properties.massfraction = mml2 / mmt
+                ms.Phases(2).Properties.massfraction = mmv / mmt
+                ms.Phases(7).Properties.massfraction = mms / mmt
+            End If
+
+        End Sub
+
+        ''' <summary>Sets one phase's compound mole fractions and the mass fractions that follow from them.</summary>
+        Private Sub DW_WritePhaseComposition(phaseindex As Integer, x As Double())
+
+            If x Is Nothing Then Exit Sub
+
+            Dim i As Integer = 0
+            For Each subst As Interfaces.ICompound In Me.CurrentMaterialStream.Phases(phaseindex).Compounds.Values
+                If i >= x.Length Then Exit For
+                subst.MoleFraction = x(i)
+                i += 1
+            Next
+            For Each subst As Interfaces.ICompound In Me.CurrentMaterialStream.Phases(phaseindex).Compounds.Values
+                subst.MassFraction = Me.AUX_CONVERT_MOL_TO_MASS(subst.Name, phaseindex)
+            Next
+
+        End Sub
 
         Public MustOverride Function SupportsComponent(ByVal comp As Interfaces.ICompoundConstantProperties) As Boolean
 
@@ -3722,95 +3892,233 @@ redirect2:                  IObj?.SetCurrent()
                 ByRef CP As ArrayList, ByRef TCR As Double, ByRef PCR As Double, ByRef VCR As Double,
                 ByRef stopAtCP As Boolean, ByRef recalcCP As Boolean)
 
-            If TypeOf Me Is PengRobinsonPropertyPackage Then
-                If n > 0 Then
-                    CP = New Utilities.TCP.Methods().CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij2)
-                    If CP.Count = 0 Then CP = New Utilities.TCP.Methods().CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij3)
-                    If CP.Count > 0 Then
-                        Dim cp0 = CP(0)
-                        TCR = cp0(0)
-                        PCR = cp0(1)
-                        VCR = cp0(2)
-                        stopAtCP = True
-                    Else
-                        TCR = Me.AUX_TCM(Phase.Mixture)
-                        PCR = Me.AUX_PCM(Phase.Mixture)
-                        VCR = Me.AUX_VCM(Phase.Mixture)
-                        recalcCP = True
-                    End If
-                Else
-                    TCR = Me.AUX_TCM(Phase.Mixture)
-                    PCR = Me.AUX_PCM(Phase.Mixture)
-                    VCR = Me.AUX_VCM(Phase.Mixture)
-                    CP.Add(New Object() {TCR, PCR, VCR})
-                End If
-            ElseIf TypeOf Me Is PengRobinson1978PropertyPackage Then
-                If n > 0 Then
-                    CP = New Utilities.TCP.Methods(Utilities.TCP.CubicCP.EOS_PR78).CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij2)
-                    If CP.Count = 0 Then CP = New Utilities.TCP.Methods(Utilities.TCP.CubicCP.EOS_PR78).CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij3)
-                    If CP.Count > 0 Then
-                        Dim cp0 = CP(0)
-                        TCR = cp0(0)
-                        PCR = cp0(1)
-                        VCR = cp0(2)
-                        stopAtCP = True
-                    Else
-                        TCR = Me.AUX_TCM(Phase.Mixture)
-                        PCR = Me.AUX_PCM(Phase.Mixture)
-                        VCR = Me.AUX_VCM(Phase.Mixture)
-                        recalcCP = True
-                    End If
-                Else
-                    TCR = Me.AUX_TCM(Phase.Mixture)
-                    PCR = Me.AUX_PCM(Phase.Mixture)
-                    VCR = Me.AUX_VCM(Phase.Mixture)
-                    CP.Add(New Object() {TCR, PCR, VCR})
-                End If
-            ElseIf TypeOf Me Is SRKPropertyPackage Then
-                If n > 0 Then
-                    CP = New Utilities.TCP.Methods(Utilities.TCP.CubicCP.EOS_SRK).CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij2)
-                    If CP.Count = 0 Then CP = New Utilities.TCP.Methods(Utilities.TCP.CubicCP.EOS_SRK).CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij3)
-                    If CP.Count > 0 Then
-                        Dim cp0 = CP(0)
-                        TCR = cp0(0)
-                        PCR = cp0(1)
-                        VCR = cp0(2)
-                        stopAtCP = True
-                    Else
-                        TCR = Me.AUX_TCM(Phase.Mixture)
-                        PCR = Me.AUX_PCM(Phase.Mixture)
-                        VCR = Me.AUX_VCM(Phase.Mixture)
-                        recalcCP = True
-                    End If
-                Else
-                    TCR = Me.AUX_TCM(Phase.Mixture)
-                    PCR = Me.AUX_PCM(Phase.Mixture)
-                    VCR = Me.AUX_VCM(Phase.Mixture)
-                    CP.Add(New Object() {TCR, PCR, VCR})
-                End If
-            Else
-                If n > 0 Then
-                    CP = New ArrayList(DW_CalculateCriticalPoints())
-                    If CP.Count > 0 Then
-                        Dim cp0 = CP(0)
-                        TCR = cp0(0)
-                        PCR = cp0(1)
-                        VCR = cp0(2)
-                        stopAtCP = True
-                    Else
-                        TCR = Me.AUX_TCM(Phase.Mixture)
-                        PCR = Me.AUX_PCM(Phase.Mixture)
-                        VCR = Me.AUX_VCM(Phase.Mixture)
-                        recalcCP = True
-                    End If
-                Else
-                    TCR = Me.AUX_TCM(Phase.Mixture)
-                    PCR = Me.AUX_PCM(Phase.Mixture)
-                    VCR = Me.AUX_VCM(Phase.Mixture)
-                    CP.Add(New Object() {TCR, PCR, VCR})
-                End If
-            End If
+            ' Every branch below already falls back to the pseudo-critical point when the solver
+            ' returns nothing. An exception is the same outcome by a different route - a property
+            ' package with no analytical critical point (Raoult's Law has no DW_CalcP, so the
+            ' generic method throws NotImplementedException) failed the whole envelope instead of
+            ' plotting it with the pseudo-critical point, which is what the empty result does.
+            Try
 
+                If TypeOf Me Is PengRobinsonPropertyPackage Then
+                    If n > 0 Then
+                        CP = New Utilities.TCP.Methods().CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij2)
+                        If CP.Count = 0 Then CP = New Utilities.TCP.Methods().CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij3)
+                        If CP.Count > 0 Then
+                            Dim cp0 = CP(0)
+                            TCR = cp0(0)
+                            PCR = cp0(1)
+                            VCR = cp0(2)
+                            stopAtCP = True
+                        Else
+                            TCR = Me.AUX_TCM(Phase.Mixture)
+                            PCR = Me.AUX_PCM(Phase.Mixture)
+                            VCR = Me.AUX_VCM(Phase.Mixture)
+                            recalcCP = True
+                        End If
+                    Else
+                        TCR = Me.AUX_TCM(Phase.Mixture)
+                        PCR = Me.AUX_PCM(Phase.Mixture)
+                        VCR = Me.AUX_VCM(Phase.Mixture)
+                        CP.Add(New Object() {TCR, PCR, VCR})
+                    End If
+                ElseIf TypeOf Me Is PengRobinson1978PropertyPackage Then
+                    If n > 0 Then
+                        CP = New Utilities.TCP.Methods(Utilities.TCP.CubicCP.EOS_PR78).CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij2)
+                        If CP.Count = 0 Then CP = New Utilities.TCP.Methods(Utilities.TCP.CubicCP.EOS_PR78).CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij3)
+                        If CP.Count > 0 Then
+                            Dim cp0 = CP(0)
+                            TCR = cp0(0)
+                            PCR = cp0(1)
+                            VCR = cp0(2)
+                            stopAtCP = True
+                        Else
+                            TCR = Me.AUX_TCM(Phase.Mixture)
+                            PCR = Me.AUX_PCM(Phase.Mixture)
+                            VCR = Me.AUX_VCM(Phase.Mixture)
+                            recalcCP = True
+                        End If
+                    Else
+                        TCR = Me.AUX_TCM(Phase.Mixture)
+                        PCR = Me.AUX_PCM(Phase.Mixture)
+                        VCR = Me.AUX_VCM(Phase.Mixture)
+                        CP.Add(New Object() {TCR, PCR, VCR})
+                    End If
+                ElseIf TypeOf Me Is SRKPropertyPackage Then
+                    If n > 0 Then
+                        CP = New Utilities.TCP.Methods(Utilities.TCP.CubicCP.EOS_SRK).CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij2)
+                        If CP.Count = 0 Then CP = New Utilities.TCP.Methods(Utilities.TCP.CubicCP.EOS_SRK).CRITPT_PR(Vm2, VTc2, VPc2, VVc2, Vw2, VKij3)
+                        If CP.Count > 0 Then
+                            Dim cp0 = CP(0)
+                            TCR = cp0(0)
+                            PCR = cp0(1)
+                            VCR = cp0(2)
+                            stopAtCP = True
+                        Else
+                            TCR = Me.AUX_TCM(Phase.Mixture)
+                            PCR = Me.AUX_PCM(Phase.Mixture)
+                            VCR = Me.AUX_VCM(Phase.Mixture)
+                            recalcCP = True
+                        End If
+                    Else
+                        TCR = Me.AUX_TCM(Phase.Mixture)
+                        PCR = Me.AUX_PCM(Phase.Mixture)
+                        VCR = Me.AUX_VCM(Phase.Mixture)
+                        CP.Add(New Object() {TCR, PCR, VCR})
+                    End If
+                Else
+                    If n > 0 Then
+                        CP = New ArrayList(DW_CalculateCriticalPoints())
+                        If CP.Count > 0 Then
+                            Dim cp0 = CP(0)
+                            TCR = cp0(0)
+                            PCR = cp0(1)
+                            VCR = cp0(2)
+                            stopAtCP = True
+                        Else
+                            TCR = Me.AUX_TCM(Phase.Mixture)
+                            PCR = Me.AUX_PCM(Phase.Mixture)
+                            VCR = Me.AUX_VCM(Phase.Mixture)
+                            recalcCP = True
+                        End If
+                    Else
+                        TCR = Me.AUX_TCM(Phase.Mixture)
+                        PCR = Me.AUX_PCM(Phase.Mixture)
+                        VCR = Me.AUX_VCM(Phase.Mixture)
+                        CP.Add(New Object() {TCR, PCR, VCR})
+                    End If
+                End If
+
+
+            Catch ex As Exception
+
+                CP.Clear()
+                TCR = Me.AUX_TCM(Phase.Mixture)
+                PCR = Me.AUX_PCM(Phase.Mixture)
+                VCR = Me.AUX_VCM(Phase.Mixture)
+                If n > 0 Then
+                    recalcCP = True
+                Else
+                    CP.Add(New Object() {TCR, PCR, VCR})
+                End If
+
+            End Try
+
+        End Sub
+
+        ''' <summary>
+        ''' Finishes the phase-envelope dew line along its retrograde branch, ending exactly on the
+        ''' analytical critical point. A fixed-temperature dew flash has no solution once the
+        ''' temperature passes the cricondentherm, so the T-stepping tracer overshoots and gets a
+        ''' spurious supercritical root there. The retrograde branch is single-valued in pressure, so
+        ''' step the pressure up to the critical pressure instead, solving for the (descending) dew
+        ''' temperature at each step, then close the curve on the critical point. Used only for the
+        ''' cubic packages, whose critical point is known analytically (stopAtCP).
+        ''' </summary>
+        Private Sub TraceDewRetrogradeToCP(Vz As Double(), PO As List(Of Double), TVD As List(Of Double),
+                                           HO As List(Of Double), SO As List(Of Double), VO As List(Of Double),
+                                           TCR As Double, PCR As Double, deltaP As Double)
+            Dim pPrev As Double = PO(PO.Count - 1)
+            Dim tPrev As Double = TVD(TVD.Count - 1)
+            ' Which side of the critical temperature the retrograde branch runs on: from below for a
+            ' mixture whose dew temperature rises to Tc (no cricondentherm above it), from above for one
+            ' with a cricondentherm past Tc.
+            If tPrev < TCR Then
+                ' Rising dew line: the near-critical dew flash from below does not converge (both the
+                ' fixed-T and fixed-P forms hit their iteration limit above ~Tc-8 K, or latch onto a
+                ' spurious root past Tc), and forcing it is prohibitively slow. Draw a shape-preserving
+                ' curve from the last converged point to the analytical critical point instead.
+                FillDewToCP(Vz, PO, TVD, HO, SO, VO, TCR, PCR)
+                Return
+            End If
+            ' A cricondentherm above Tc: past it the retrograde branch is single-valued in pressure and
+            ' the dew flash converges cheaply. Step pressure up to Pc, solving for the dew temperature
+            ' (Flash_PV), seeded by the local slope so the flash stays on the branch.
+            Dim pStep As Double = If(deltaP > 0, deltaP, 25000.0)
+            Dim pPrev2 As Double = If(PO.Count >= 2, PO(PO.Count - 2), pPrev)
+            Dim tPrev2 As Double = If(TVD.Count >= 2, TVD(TVD.Count - 2), tPrev)
+            Dim prevDist As Double = Math.Abs(tPrev - TCR)
+            Dim pR As Double = pPrev + pStep
+            Do While pR < PCR * 0.999
+                Dim tGuess As Double = tPrev
+                If Math.Abs(pPrev - pPrev2) > 1.0 Then
+                    tGuess = tPrev + (tPrev - tPrev2) / (pPrev - pPrev2) * (pR - pPrev)
+                End If
+                Dim tR As Double
+                Try
+                    Dim rr = Me.FlashBase.Flash_PV(Vz, pR, 1, tGuess, Me)
+                    tR = CDbl(rr(4))
+                Catch
+                    Exit Do
+                End Try
+                If tR <= 0.0 Then Exit Do
+                ' a root that has dropped below Tc while still below Pc is the spurious near-critical root
+                If tR < TCR Then Exit Do
+                Dim dist As Double = Math.Abs(tR - TCR)
+                ' the distance to Tc must keep shrinking; a farther root, or one that disagrees with the
+                ' branch extrapolation, is a stray root - stop and close on the critical point.
+                If dist > prevDist + 0.1 Then Exit Do
+                If Math.Abs(tR - tGuess) > 5.0 Then Exit Do
+                If dist < 0.35 Then Exit Do
+                TVD.Add(tR)
+                PO.Add(pR)
+                HO.Add(Me.DW_CalcEnthalpy(Vz, tR, pR, State.Vapor))
+                SO.Add(Me.DW_CalcEntropy(Vz, tR, pR, State.Vapor))
+                VO.Add(1 / Me.AUX_VAPDENS(tR, pR) * Me.AUX_MMM(Phase.Mixture))
+                pPrev2 = pPrev : tPrev2 = tPrev
+                pPrev = pR : tPrev = tR
+                prevDist = dist
+                pR += pStep
+            Loop
+            ' A residual gap below Pc (the pressure-stepping stopped short where the roots merge) is
+            ' closed with the same shape-preserving nose so the descending branch meets the CP smoothly.
+            FillDewToCP(Vz, PO, TVD, HO, SO, VO, TCR, PCR)
+        End Sub
+
+        ''' <summary>
+        ''' Close the dew line from its last converged point onto the analytical critical point with a
+        ''' cubic-Hermite nose. The dew line meets the critical point tangent to the pressure axis (dew
+        ''' temperature flat in pressure there, the retrograde nose), so the end slope dT/dP is zero; the
+        ''' start slope is taken from the last two points. Property values along the fill are ordinary
+        ''' single-phase vapour evaluations. If the last point already sits on the CP, only the CP is added.
+        ''' </summary>
+        Private Sub FillDewToCP(Vz As Double(), PO As List(Of Double), TVD As List(Of Double),
+                                HO As List(Of Double), SO As List(Of Double), VO As List(Of Double),
+                                TCR As Double, PCR As Double)
+            Dim pLast As Double = PO(PO.Count - 1)
+            Dim tLast As Double = TVD(TVD.Count - 1)
+            Dim dp As Double = PCR - pLast
+            If dp > 5000.0 AndAlso Math.Abs(TCR - tLast) > 0.05 Then
+                Dim pPrev2 As Double = If(PO.Count >= 2, PO(PO.Count - 2), pLast)
+                Dim tPrev2 As Double = If(TVD.Count >= 2, TVD(TVD.Count - 2), tLast)
+                Dim mLast As Double = 0.0
+                If Math.Abs(pLast - pPrev2) > 1.0 Then mLast = (tLast - tPrev2) / (pLast - pPrev2)
+                Dim nFill As Integer = 15
+                For s As Integer = 1 To nFill - 1
+                    Dim u As Double = s / CDbl(nFill)
+                    Dim pF As Double = pLast + dp * u
+                    Dim h00 As Double = 2 * u ^ 3 - 3 * u ^ 2 + 1
+                    Dim h10 As Double = u ^ 3 - 2 * u ^ 2 + u
+                    Dim h01 As Double = -2 * u ^ 3 + 3 * u ^ 2
+                    Dim tF As Double = h00 * tLast + h10 * dp * mLast + h01 * TCR
+                    ' never overshoot the critical temperature (the nose approaches it, does not cross it)
+                    If tLast < TCR Then
+                        tF = Math.Min(tF, TCR)
+                    Else
+                        tF = Math.Max(tF, TCR)
+                    End If
+                    TVD.Add(tF)
+                    PO.Add(pF)
+                    HO.Add(Me.DW_CalcEnthalpy(Vz, tF, pF, State.Vapor))
+                    SO.Add(Me.DW_CalcEntropy(Vz, tF, pF, State.Vapor))
+                    VO.Add(1 / Me.AUX_VAPDENS(tF, pF) * Me.AUX_MMM(Phase.Mixture))
+                Next
+            End If
+            ' close the dew line exactly on the analytical critical point
+            TVD.Add(TCR)
+            PO.Add(PCR)
+            HO.Add(Me.DW_CalcEnthalpy(Vz, TCR, PCR, State.Vapor))
+            SO.Add(Me.DW_CalcEntropy(Vz, TCR, PCR, State.Vapor))
+            VO.Add(1 / Me.AUX_VAPDENS(TCR, PCR) * Me.AUX_MMM(Phase.Mixture))
         End Sub
 
         Public Overridable Function DW_ReturnPhaseEnvelope(ByVal peoptions As PhaseEnvelopeOptions, Optional ByVal bw As System.ComponentModel.BackgroundWorker = Nothing) As Object
@@ -4379,6 +4687,12 @@ redirect2:                  IObj?.SetCurrent()
                                 ' smoothly, so a large jump from the last accepted point means the curve has
                                 ' reached its end: stop instead of appending the stray point.
                                 If PO.Count > 0 AndAlso Math.Abs(Presult - PO(PO.Count - 1)) > 0.5 * PO(PO.Count - 1) Then Exit Do
+                                ' A dew point past the critical point in BOTH temperature and pressure sits in
+                                ' the single-phase supercritical region, where no dew line exists: the flash has
+                                ' latched onto a spurious root. The genuine retrograde extrema each cross only one
+                                ' critical coordinate (the cricondentherm has T>Tc with P<Pc, the cricondenbar
+                                ' P>Pc with T<Tc), so crossing both means the curve has run past its end - stop.
+                                If T > TCR AndAlso Presult > PCR Then Exit Do
                                 Dim dewPdeviation = If(Pguess > 0, Math.Abs(Presult - Pguess) / Pguess, 0.0)
                                 If dewValidate AndAlso dewPdeviation > 0.03 Then
                                     Flowsheet?.ShowMessage("Phase Envelope generation: Dew TVF point rejected (P=" & Presult.ToString("G6") & " vs expected " & Pguess.ToString("G6") & ")", IFlowsheet.MessageType.Warning)
@@ -4438,6 +4752,19 @@ redirect2:                  IObj?.SetCurrent()
                                 ' A real dew line steps smoothly, so a large jump from the last accepted point
                                 ' means the curve has reached its end: stop instead of appending the stray point.
                                 If TVD.Count > 0 AndAlso Math.Abs(Tresult - TVD(TVD.Count - 1)) > 50.0 Then Exit Do
+                                ' A dew point past the critical point in BOTH temperature and pressure sits in
+                                ' the single-phase supercritical region, where no dew line exists: the flash has
+                                ' latched onto a spurious root. The genuine retrograde extrema each cross only one
+                                ' critical coordinate, so crossing both means the curve has run past its end - stop.
+                                If Tresult > TCR AndAlso P > PCR Then Exit Do
+                                ' Near a known critical point the pressure-stepping flash can latch onto a root on
+                                ' the far side of the critical temperature - the dew temperature jumping past Tc
+                                ' while the pressure is still below Pc - which draws a spurious spike above the
+                                ' envelope (seen on ethane-rich mixtures whose dew line rises to Tc with no
+                                ' cricondentherm above it). When the dew line is still approaching Tc from below,
+                                ' such a crossing is not physical here: stop and let the retrograde finish (which
+                                ' seeds each flash by extrapolating along the branch) close smoothly on the CP.
+                                If stopAtCP AndAlso Tresult > TCR AndAlso P < PCR AndAlso TVD(TVD.Count - 1) < TCR Then Exit Do
                                 Dim dewTdeviation = If(Tguess > 0, Math.Abs(Tresult - Tguess) / Tguess, 0.0)
                                 If dewValidate AndAlso dewTdeviation > 0.02 Then
                                     Flowsheet?.ShowMessage("Phase Envelope generation: Dew PVF point rejected (T=" & Tresult.ToString("G6") & " vs expected " & Tguess.ToString("G6") & ")", IFlowsheet.MessageType.Warning)
@@ -4500,6 +4827,15 @@ redirect2:                  IObj?.SetCurrent()
 
                         Dim pastCricondentherm = (TVD.Count >= 3 AndAlso TVD(TVD.Count - 1) < TVD(TVD.Count - 2))
 
+                        ' Once the dew line turns back past the cricondentherm within reach of a known
+                        ' critical point, hand off to the pressure-stepping retrograde finish. The
+                        ' temperature-stepping tracer here solves the dew pressure from the temperature,
+                        ' and past the cricondentherm that has two roots - it takes the low-pressure one
+                        ' and retraces its way back down instead of climbing the retrograde branch to the
+                        ' critical point (seen on methane-rich mixtures, whose cricondentherm sits above
+                        ' the critical temperature). The retrograde branch is single-valued in pressure.
+                        If stopAtCP AndAlso pastCricondentherm AndAlso dewRelDistCP < 0.5 Then Exit Do
+
                         If pastCricondentherm AndAlso dewRelDistCP < 0.15 Then
                             Dim absDeltaT = If(dewRelDistCP < 0.05, 0.5, 1.0)
                             Dim absDeltaP = If(dewRelDistCP < 0.05, 10000.0, 50000.0)
@@ -4543,6 +4879,20 @@ redirect2:                  IObj?.SetCurrent()
 
                 Loop Until i >= options.DewCurveMaximumPoints Or PO(PO.Count - 1) = 0 Or PO(PO.Count - 1) < 0 Or TVD(TVD.Count - 1) < 0 Or
                         Double.IsNaN(PO(PO.Count - 1)) = True Or Double.IsNaN(TVD(TVD.Count - 1)) = True Or T >= options.DewCurveMaximumTemperature
+
+                ' The temperature-stepping tracer cannot cross the cricondentherm, so on a package
+                ' with an analytical critical point (stopAtCP) the dew line stops short of it - at the
+                ' cricondentherm, or where the genuine pressure steepening outruns the barycentric
+                ' guess and the point gets rejected. Whatever ended the loop, if the last dew point is
+                ' near the critical point but not on it, finish the line along its retrograde branch
+                ' (single-valued in pressure) up to the critical point.
+                If stopAtCP AndAlso PO.Count > 0 AndAlso TVD.Count > 0 Then
+                    Dim dewLastRelCP = Math.Max(Math.Abs(TVD(TVD.Count - 1) - TCR) / TCR, Math.Abs(PO(PO.Count - 1) - PCR) / PCR)
+                    Dim dewAtCP = (Math.Abs(PO(PO.Count - 1) - PCR) / PCR < 0.001 AndAlso Math.Abs(TVD(TVD.Count - 1) - TCR) / TCR < 0.001)
+                    If Not dewAtCP AndAlso dewLastRelCP < 0.5 AndAlso PO(PO.Count - 1) < PCR Then
+                        TraceDewRetrogradeToCP(Vz, PO, TVD, HO, SO, VO, TCR, PCR, options.DewCurveDeltaP)
+                    End If
+                End If
 
                 If recalcCP OrElse (Not TypeOf Me Is PengRobinsonPropertyPackage And Not TypeOf Me Is PengRobinson1978PropertyPackage And Not TypeOf Me Is SRKPropertyPackage) Then
 
@@ -5283,6 +5633,13 @@ redirect2:                  IObj?.SetCurrent()
                     End While
                 End If
             End If
+
+            ' The critical point is consumed as cpdata(0) with no emptiness check, and there are two ways
+            ' to get here without one: the solver returned nothing and the bubble and dew curves never
+            ' crossed (recalcCP), or the package has no analytical critical point at all. Both already
+            ' computed the pseudo-critical point into TCR/PCR/VCR - carry it, rather than returning an
+            ' empty list for the caller to index into.
+            If CP.Count = 0 Then CP.Add(New Object() {TCR, PCR, VCR})
 
             Return New Object() {TVB, PB, HB, SB, VB, TVD, PO, HO, SO, VO, TE, PE, THsI, PHsI, THsII, CP, TQ, PQ, TI, PI, TOWF, POWF, HOWF, SOWF, VOWF, TVB1, PB1, HB1, SB1, VB1, TVB2, PB2, HB2, SB2, VB2, TSLE1, PSLE1, TSLE2, PSLE2, TWidomCp, PWidomCp, TWidomBetaT, PWidomBetaT, TWidomAvg, PWidomAvg, PHsII}
 
@@ -7029,6 +7386,19 @@ redirect2:                  IObj?.SetCurrent()
 
         End Function
 
+        ''' <summary>
+        ''' Per-compound flag marking a compound as effectively non-volatile (for example a high-molar-mass
+        ''' polymer, whose vapour pressure is negligible and whose vapour-liquid K-value is essentially zero).
+        ''' The default is all False, so ordinary packages are unaffected. A package that models such species
+        ''' (PC-SAFT for polymers) overrides this so the vapour-liquid flash keeps them in the liquid instead
+        ''' of reading a spurious vapour pressure off placeholder critical constants.
+        ''' </summary>
+        Public Overridable Function RET_VNONVOLATILE() As Boolean()
+            Dim nn As Integer = Me.CurrentMaterialStream.Phases(0).Compounds.Count
+            Dim flags(nn - 1) As Boolean
+            Return flags
+        End Function
+
         Public Overridable Function RET_VPVAP(ByVal T As Double) As Double()
 
             Dim val(Me.CurrentMaterialStream.Phases(0).Compounds.Count - 1) As Double
@@ -7619,7 +7989,10 @@ Final3:
 
             i = 0
             For Each subst As Interfaces.ICompound In Me.CurrentMaterialStream.Phases(0).Compounds.Values
-                val += Vxw(i) * Me.AUX_HVAPi(subst.Name, T)
+                ' Guard against a single compound with an undefined heat of vaporisation (e.g. an
+                ' incompletely defined pseudo-compound) poisoning the whole mixture through 0*NaN.
+                Dim hv As Double = Me.AUX_HVAPi(subst.Name, T)
+                If Not Double.IsNaN(hv) AndAlso Not Double.IsInfinity(hv) Then val += Vxw(i) * hv
                 i += 1
             Next
 
@@ -7706,6 +8079,13 @@ Final3:
                     result = cprop.HVap_A * ((1 - Tr) / (1 - tr1)) ^ 0.375
                 End If
 
+                ' An incompletely defined User/biomass compound can carry an invalid normal boiling
+                ' point above its critical temperature (tr1 > 1), which turns the Watson term into a
+                ' fractional power of a negative number and returns NaN - or a negative HVap from the
+                ' Vetere fallback on a bad Pc. Either way it would poison RET_HVAPM (and every Raoult
+                ' liquid enthalpy) through the 0*NaN term in the mixture sum. A non-volatile pseudo-
+                ' compound has no meaningful heat of vaporisation, so clamp to zero.
+                If Double.IsNaN(result) OrElse Double.IsInfinity(result) OrElse result < 0.0 Then result = 0.0
                 Return result
             ElseIf cprop.OriginalDB = "ChEDL Thermo" Then
                 Dim eqno As String = cprop.VaporizationEnthalpyEquation
@@ -8438,6 +8818,8 @@ Final3:
 
         End Function
 
+        <ThreadStatic> Private Shared _inLiqDensMbGuard As Boolean
+
         Public Overridable Function AUX_LIQDENS(ByVal T As Double, ByVal Vx As Array, Optional ByVal P As Double = 0, Optional ByVal Pvp As Double = 0, Optional ByVal FORCE_EOS As Boolean = False) As Double
 
             Dim IObj As Inspector.InspectorItem = Inspector.Host.GetNewInspectorItem()
@@ -8552,25 +8934,72 @@ Final3:
                 Dim vk(Me.CurrentMaterialStream.Phases(0).Compounds.Count - 1) As Double
                 Dim i As Integer
                 i = 0
+
+                'A pure-compound saturated liquid density correlation collapses towards the critical
+                'density as the compound approaches its own critical temperature, with an infinite slope
+                'at Tc. That is not a usable partial molar volume for a light compound dissolved in a
+                'much heavier liquid, and dropping the compound from the volume sum at Tc puts a step in
+                'the mixture density. Once a compound's own reduced temperature runs ahead of the
+                'mixture's, evaluate its correlation at the mixture's reduced temperature instead, so a
+                'dissolved light compound follows the state of the liquid it is dissolved in. The floor
+                'leaves the correlation in charge everywhere it is still trustworthy; a compound that is
+                'itself the near-critical solvent is untouched, its reduced temperature being the
+                'mixture's.
+                Dim Tcm As Double = props.Tcm(Vx, RET_VTC())
+                Dim Trcap As Double = Math.Max(If(Tcm > 0.0, T / Tcm, 0.0), 0.9)
+
                 For Each subst As Interfaces.ICompound In Me.CurrentMaterialStream.Phases(1).Compounds.Values
                     IObj?.SetCurrent()
                     IObj?.Paragraphs.Add(String.Format("Calculating value for {0}... (xi = {1}, wi = {2})", subst.Name, subst.MoleFraction.GetValueOrDefault, subst.MassFraction.GetValueOrDefault))
-                    vk(i) = AUX_LIQDENSi(subst, T)
-                    IObj?.Paragraphs.Add(String.Format("Value calculated from experimental curve: {0} kg/m3", vk(i)))
+                    Dim Tci As Double = subst.ConstantProperties.Critical_Temperature
+                    Dim Ti As Double = T
+                    If Tci > 0.0 AndAlso T > Trcap * Tci Then Ti = Trcap * Tci
+                    vk(i) = AUX_LIQDENSi(subst, Ti)
+                    IObj?.Paragraphs.Add(String.Format("Value calculated from experimental curve at {0} K: {1} kg/m3", Ti, vk(i)))
                     If LiquidDensity_CorrectExpDataForPressure Then
                         'pressure correction
-                        Dim pcorr = Auxiliary.PROPS.liq_dens_pcorrection(T / subst.ConstantProperties.Critical_Temperature, P, subst.ConstantProperties.Critical_Pressure, AUX_PVAPi(subst.Name, T), subst.ConstantProperties.Acentric_Factor)
+                        Dim pcorr = Auxiliary.PROPS.liq_dens_pcorrection(Ti / Tci, P, subst.ConstantProperties.Critical_Pressure, AUX_PVAPi(subst.Name, Ti), subst.ConstantProperties.Acentric_Factor)
                         IObj?.Paragraphs.Add(String.Format("Compressed Liquid Density Correction Factor: {0}", pcorr))
                         vk(i) *= pcorr
                         IObj?.Paragraphs.Add(String.Format("Corrected Liquid Density: {0} kg/m3", vk(i)))
                     End If
-                    If T > subst.ConstantProperties.Critical_Temperature Then
+                    'drop the compound from the sum, as before. Now only reachable once the mixture itself
+                    'is above its pseudocritical temperature, or for a compound with no critical
+                    'temperature on record; with every compound dropped the covolume guard below hands
+                    'the whole calculation over to the equation of state.
+                    If Ti > Tci Then
                         vk(i) = 1.0E+20
                     End If
-                    If Not Double.IsNaN(vk(i)) Then vk(i) = Vx(i) / vk(i) Else vk(i) = 0.0#
+                    'volumes add on a mass basis, so each compound enters the sum weighted by its mass
+                    'and not by its mole fraction, which would over-weight the light ones by M/Mi.
+                    Dim mi As Double = Vx(i) * subst.ConstantProperties.Molar_Weight
+                    If Not Double.IsNaN(vk(i)) Then vk(i) = mi / vk(i) Else vk(i) = 0.0#
                     i = i + 1
                 Next
-                val = 1 / MathEx.Common.Sum(vk)
+                val = AUX_MMM(Vx) / MathEx.Common.Sum(vk)
+            End If
+
+            'The molar volume can never be smaller than the equation-of-state covolume b, so the liquid
+            'density can never exceed M/b. Correlation paths (Rackett, per-compound) can break this near
+            'the mixture critical point; when they do, fall back to the equation of state, whose
+            'compressibility factor now stays above the covolume. The re-entrancy flag keeps activity
+            'packages, whose AUX_Z is itself derived from this density, from recursing.
+            If Not _inLiqDensMbGuard Then
+                Dim bmix As Double = 0.0
+                Dim vtc = RET_VTC() : Dim vpc = RET_VPC()
+                For k As Integer = 0 To Vx.Length - 1
+                    If vpc(k) > 0.0 Then bmix += CDbl(Vx(k)) * 0.0778 * 8.314 * vtc(k) / vpc(k)
+                Next
+                Dim mkg As Double = AUX_MMM(Vx) / 1000.0
+                If bmix > 0.0 AndAlso val > mkg / bmix Then
+                    _inLiqDensMbGuard = True
+                    Try
+                        Dim zeos = AUX_Z(Vx, T, P, PhaseName.Liquid)
+                        If zeos > 0.0 Then val = mkg / (zeos * 8.314 * T / P)
+                    Finally
+                        _inLiqDensMbGuard = False
+                    End Try
+                End If
             End If
 
             IObj?.Paragraphs.Add("<h2>Results</h2>")

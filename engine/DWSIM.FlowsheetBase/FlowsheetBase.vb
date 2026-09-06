@@ -194,6 +194,17 @@ Imports DWSIM.ExtensionMethods
         prm = _prm
     End Sub
 
+    ''' <summary>Returns the resource manager used for resolving localised strings, or Nothing when none was set.</summary>
+    ''' <remarks>Cloning a flowsheet has to carry these over, or the copy cannot resolve any string.</remarks>
+    Public Function GetResourcesManager() As Resources.ResourceManager
+        Return rm
+    End Function
+
+    ''' <summary>Returns the resource manager used for resolving localised property names, or Nothing when none was set.</summary>
+    Public Function GetPropertyResourcesManager() As Resources.ResourceManager
+        Return prm
+    End Function
+
     ''' <summary>
     ''' Adds all compounds currently selected in the flowsheet to all phases of the given material stream,
     ''' then equalises the overall composition and recalculates mass fractions.
@@ -1004,6 +1015,10 @@ Imports DWSIM.ExtensionMethods
 
                 Return Me.SimulationObjects(AddObjectToSurface(ObjectType.CapeOpenUO, x, y, tag,,, CreateConnected))
 
+            Case "ChemSep Column"
+
+                Return Me.SimulationObjects(AddObjectToSurface(ObjectType.CapeOpenUO, x, y, tag,,, CreateConnected, True))
+
             Case "Digital Gauge"
 
                 Return Me.SimulationObjects(AddObjectToSurface(ObjectType.DigitalGauge, x, y, tag,,, CreateConnected))
@@ -1035,10 +1050,6 @@ Imports DWSIM.ExtensionMethods
             Case "Switch"
 
                 Return Me.SimulationObjects(AddObjectToSurface(ObjectType.Switch, x, y, tag,,, CreateConnected))
-
-            Case "Air Cooler 2"
-
-                Return Me.SimulationObjects(AddObjectToSurface(ObjectType.AirCooler2, x, y, tag,,, CreateConnected))
 
             Case "Gibbs Reactor (Reaktoro)"
 
@@ -1323,10 +1334,6 @@ Imports DWSIM.ExtensionMethods
 
                 Return AddObject(ObjectType.Switch, 50, 50, objname)
 
-            Case "Air Cooler 2"
-
-                Return AddObject(ObjectType.AirCooler2, 50, 50, objname)
-
             Case "Gibbs Reactor (Reaktoro)"
 
                 Return AddObject(ObjectType.RCT_GibbsReaktoro, 50, 50, objname)
@@ -1376,7 +1383,8 @@ Imports DWSIM.ExtensionMethods
                                        Optional tag As String = "",
                                        Optional id As String = "",
                                        Optional uoobj As Interfaces.IExternalUnitOperation = Nothing,
-                                       Optional CreateConnected As Boolean = False) As String
+                                       Optional CreateConnected As Boolean = False,
+                                       Optional chemsep As Boolean = False) As String
 
         RegisterSnapshot(SnapshotType.ObjectAddedOrRemoved)
 
@@ -2123,8 +2131,14 @@ Imports DWSIM.ExtensionMethods
                 CheckTag(gObj)
                 gObj.Name = "COUO-" & Guid.NewGuid.ToString
                 If id <> "" Then gObj.Name = id
+                If chemsep Then
+                    If tag = "" Then gObj.Tag = "CSCOL-" + objindex
+                    DirectCast(gObj, CAPEOPENGraphic).ChemSep = True
+                    gObj.Width = 144
+                    gObj.Height = 180
+                End If
                 GraphicObjects.Add(gObj.Name, myCUO)
-                Dim myCOCUO As CapeOpenUO = New CapeOpenUO(myCUO.Name, "CapeOpenUnitOperation", gObj, False)
+                Dim myCOCUO As CapeOpenUO = New CapeOpenUO(myCUO.Name, "CapeOpenUnitOperation", gObj, chemsep)
                 myCOCUO.GraphicObject = myCUO
                 SimulationObjects.Add(myCUO.Name, myCOCUO)
 
@@ -3305,6 +3319,10 @@ Imports DWSIM.ExtensionMethods
 
         For Each xel As XElement In data
             Try
+                ' An empty <GraphicObject/> carries nothing to read. Files written by older versions contain
+                ' one - the FOSSEE flowsheets do - and dereferencing its missing children failed the load of
+                ' the whole flowsheet: four NullReferenceExceptions, none of them about a real object.
+                If xel.Element("Type") Is Nothing OrElse xel.Element("ObjectType") Is Nothing Then Continue For
                 xel.Element("Type").Value = xel.Element("Type").Value.Replace("Microsoft.MSDN.Samples.GraphicObjects", "DWSIM.DrawingTools.GraphicObjects")
                 xel.Element("ObjectType").Value = xel.Element("ObjectType").Value.Replace("OT_Ajuste", "OT_Adjust")
                 xel.Element("ObjectType").Value = xel.Element("ObjectType").Value.Replace("OT_Especificacao", "OT_Spec")
@@ -3373,6 +3391,7 @@ Imports DWSIM.ExtensionMethods
 
         For Each xel As XElement In data
             Try
+                If xel.Element("Name") Is Nothing Then Continue For      ' the same empty element
                 Dim id As String = pkey & xel.Element("Name").Value
                 If id <> "" Then
                     Dim obj As IGraphicObject = (From go As IGraphicObject In FlowsheetSurface.DrawingObjects Where go.Name = id).SingleOrDefault
@@ -3405,6 +3424,7 @@ Imports DWSIM.ExtensionMethods
 
         For Each xel As XElement In data
             Try
+                If xel.Element("Name") Is Nothing Then Continue For      ' the same empty element
                 Dim id As String = pkey & xel.Element("Name").Value
                 If id <> "" Then
                     Dim obj As IGraphicObject = (From go As IGraphicObject In FlowsheetSurface.DrawingObjects Where go.Name = id).SingleOrDefault
@@ -3454,6 +3474,10 @@ Imports DWSIM.ExtensionMethods
 
         For Each xel As XElement In data
             Try
+                ' An empty <GraphicObject/> carries nothing to read. Files written by older versions contain
+                ' one - the FOSSEE flowsheets do - and dereferencing its missing children failed the load of
+                ' the whole flowsheet: four NullReferenceExceptions, none of them about a real object.
+                If xel.Element("Type") Is Nothing OrElse xel.Element("ObjectType") Is Nothing Then Continue For
                 xel.Element("Type").Value = xel.Element("Type").Value.Replace("Microsoft.MSDN.Samples.GraphicObjects", "DWSIM.DrawingTools.GraphicObjects")
                 xel.Element("ObjectType").Value = xel.Element("ObjectType").Value.Replace("OT_Ajuste", "OT_Adjust")
                 xel.Element("ObjectType").Value = xel.Element("ObjectType").Value.Replace("OT_Especificacao", "OT_Spec")
@@ -4296,7 +4320,10 @@ Label_00CC:
 
         Dim paths0 = engine.GetSearchPaths().ToList()
         Dim apppath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)
+        ' the standard library folder is "Lib" on Windows and "lib" on the cross-platform build; add
+        ' both because Linux is case-sensitive and a non-existent path is ignored by the import machinery
         paths0.Add(Path.Combine(apppath, "Lib"))
+        paths0.Add(Path.Combine(apppath, "lib"))
         Try
             engine.SetSearchPaths(paths0)
         Catch ex As Exception
@@ -5425,6 +5452,10 @@ Label_00CC:
 
                     For Each xel As XElement In data
                         Try
+                            ' An empty <GraphicObject/> carries nothing to read. Files written by older versions contain
+                            ' one - the FOSSEE flowsheets do - and dereferencing its missing children failed the load of
+                            ' the whole flowsheet: four NullReferenceExceptions, none of them about a real object.
+                            If xel.Element("Type") Is Nothing OrElse xel.Element("ObjectType") Is Nothing Then Continue For
                             xel.Element("Type").Value = xel.Element("Type").Value.Replace("Microsoft.MSDN.Samples.GraphicObjects", "DWSIM.DrawingTools.GraphicObjects")
                             xel.Element("ObjectType").Value = xel.Element("ObjectType").Value.Replace("OT_Ajuste", "OT_Adjust")
                             xel.Element("ObjectType").Value = xel.Element("ObjectType").Value.Replace("OT_Especificacao", "OT_Spec")
@@ -5670,6 +5701,12 @@ Label_00CC:
 
                 If xdoc.Element("DWSIM_Simulation_Data").Element("SimulationObjects") IsNot Nothing Then
 
+                    'CAPE-OPEN unit operations wrap a live COM object (ChemSep is an STA in-proc
+                    'server): destroying it and creating another from the persisted data during
+                    'the session brings the process down, so the live instance is kept and only
+                    'rewired to the rebuilt graphic objects below
+                    Dim livecouo = SimulationObjects.Values.OfType(Of CapeOpenUO).ToDictionary(Function(o) o.Name)
+
                     SimulationObjects.Clear()
 
                     data = xdoc.Element("DWSIM_Simulation_Data").Element("SimulationObjects").Elements.ToList
@@ -5682,8 +5719,12 @@ Label_00CC:
                         Try
                             Dim id As String = xel.<Name>.Value
                             Dim obj As SharedClasses.UnitOperations.BaseClass = Nothing
+                            Dim reused As Boolean = False
                             If xel.Element("Type").Value.Contains("Streams.MaterialStream") Then
                                 obj = New Streams.MaterialStream()
+                            ElseIf xel.Element("Type").Value.Contains("CapeOpenUO") AndAlso livecouo.ContainsKey(id) Then
+                                obj = livecouo(id)
+                                reused = True
                             Else
                                 Dim uokey As String = xel.Element("ComponentDescription").Value
                                 If AvailableExternalUnitOperations.ContainsKey(uokey) Then
@@ -5698,7 +5739,7 @@ Label_00CC:
                             gobj.Owner = obj
                             obj.SetFlowsheet(Me)
                             If Not gobj Is Nothing Then
-                                obj.LoadData(xel.Elements.ToList)
+                                If Not reused Then obj.LoadData(xel.Elements.ToList)
                                 If TypeOf obj Is Streams.MaterialStream Then
                                     For Each phase As BaseClasses.Phase In DirectCast(obj, Streams.MaterialStream).Phases.Values
                                         For Each c As ConstantProperties In Options.SelectedComponents.Values

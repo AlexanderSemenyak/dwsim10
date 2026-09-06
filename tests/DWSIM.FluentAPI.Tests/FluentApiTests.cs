@@ -1,4 +1,4 @@
-//    Runs the fluent API tests under NUnit, so they sit in the same test run as the rest.
+﻿//    Runs the fluent API tests under NUnit, so they sit in the same test run as the rest.
 //
 //    This file is part of DWSIM.
 //
@@ -48,6 +48,13 @@ namespace DWSIM.FluentAPI.Tests
 
         [Test] public void APumpFollowsItsPerformanceCurves() => PumpCurvesTest.Run();
 
+        [Test] public void PropertyIdentifiersHaveReadableNames() => PropertyCatalogTest.Run();
+        [Test] public void TheAssistantApiAnswersOverHttp() => AssistantHttpTest.Run();
+        [Test] public void TheDiagnosticsNameAFlowsheetsFaults() => FlowsheetDiagnosticsTest.Run();
+        [Test] public void ADynamicRunFollowsItsScheduledEvents() => DynamicsEventProfileTest.Run();
+
+        [Test] public void ATankFillsAtTheRateItIsFed() => DynamicsTankFillingTest.Run();
+
         [Test] public void NaturalLayoutLaysRecyclesOutAsARectangle() => RecycleLayoutTest.Run();
 
         // ----- Industrial sample flowsheets: each one solves, is checked for physical
@@ -72,5 +79,11 @@ namespace DWSIM.FluentAPI.Tests
         [Test] public void TheGreenHydrogenSampleSolvesAndSaves() => GreenHydrogenSample.Run();
 
         [Test] public void TheBiogasToGridSampleSolvesAndSaves() => BiogasToGridSample.Run();
+
+        [Test] public void ThePolymerDevolatilizationSampleSolvesAndSaves() => PolymerDevolatilizationSample.Run();
+
+        [Test] public void ThePolymerCloudPointSampleSolvesAndSaves() => PolymerCloudPointSample.Run();
+
+        [Test] public void TheCopolymerDevolatilizationSampleSolvesAndSaves() => CopolymerDevolatilizationSample.Run();
     }
 }

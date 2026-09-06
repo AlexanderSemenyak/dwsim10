@@ -10,6 +10,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using DotNumerics.Optimization;
+using DWSIM.Automation.DynamicRunner;
 using DWSIM.Interfaces;
 using DWSIM.UnitOperations.SpecialOps;
 
@@ -19,7 +20,7 @@ namespace DWSIM.UI.Desktop.Avalonia;
 /// PID Controller Tuning. Avalonia counterpart of
 /// DWSIM.UI.Desktop.Editors.Dynamics.PIDTuningTool: minimizes the summed absolute cumulative
 /// error of the selected controllers with a Nelder-Mead simplex over their Kp/Ki/Kd, running
-/// the schedule through <see cref="DynamicsIntegratorRunner"/> once per function evaluation.
+/// the schedule through <see cref="IntegratorRunner"/> once per function evaluation.
 /// </summary>
 public sealed class PIDTuningWindow : Window
 {
@@ -37,7 +38,7 @@ public sealed class PIDTuningWindow : Window
         AcceptsReturn = true,
         TextWrapping = TextWrapping.NoWrap,
         FontFamily = new FontFamily("Consolas,Courier New,monospace"),
-        FontSize = 12,
+        FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12),
         VerticalContentAlignment = VerticalAlignment.Top
     };
 
@@ -78,13 +79,13 @@ public sealed class PIDTuningWindow : Window
         left.Children.Add(new TextBlock
         {
             Text = "The schedule must have a stored initial state; tuning restores it before every trial run.",
-            FontSize = 11, Opacity = 0.8, TextWrapping = TextWrapping.Wrap
+            FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11), Opacity = 0.8, TextWrapping = TextWrapping.Wrap
         });
 
         left.Children.Add(new TextBlock { Text = "Controllers", FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 8, 0, 0) });
         left.Children.Add(new TextBlock
         {
-            Text = "Select the PID controllers to tune.", FontSize = 11, Opacity = 0.8
+            Text = "Select the PID controllers to tune.", FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11), Opacity = 0.8
         });
         left.Children.Add(new Border
         {
@@ -128,7 +129,7 @@ public sealed class PIDTuningWindow : Window
             _controllerList.Children.Add(cb);
         }
         if (_checkBoxes.Count == 0)
-            _controllerList.Children.Add(new TextBlock { Text = "No PID controllers on this flowsheet.", FontSize = 11, Opacity = 0.8 });
+            _controllerList.Children.Add(new TextBlock { Text = "No PID controllers on this flowsheet.", FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(11), Opacity = 0.8 });
     }
 
     // -------------------------------------------------------------------------
@@ -192,7 +193,7 @@ public sealed class PIDTuningWindow : Window
 
                     AppendFromWorker($"Iteration #{counter}:");
 
-                    DynamicsIntegratorRunner.RestoreState(_flowsheet, schedule.InitialFlowsheetStateID);
+                    IntegratorRunner.RestoreState(_flowsheet, schedule.InitialFlowsheetStateID);
 
                     var k = 0;
                     foreach (var controller in controllers)
@@ -204,11 +205,16 @@ public sealed class PIDTuningWindow : Window
                         k += 3;
                     }
 
-                    DynamicsIntegratorRunner.Run(_flowsheet, new DynamicsIntegratorRunner.RunOptions
+                    new IntegratorRunner(_flowsheet).Run(new IntegratorRunOptions
                     {
+                        Schedule = schedule.ID,
                         RealTime = false,
                         // The state was just restored above; do not restore it again.
                         RestoreInitialState = false,
+                        // Hot path: the objective runs the whole schedule once per evaluation, and a
+                        // snapshot plus compression per step would dominate the cost. Nothing here
+                        // needs the historian — event transitions are not being tuned.
+                        EnableHistorian = false,
                         AbortRequested = () => _abort
                     });
 

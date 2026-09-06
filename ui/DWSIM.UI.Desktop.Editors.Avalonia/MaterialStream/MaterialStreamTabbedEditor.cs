@@ -140,7 +140,7 @@ namespace DWSIM.UI.Desktop.Editors
             {
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(8, 0, 0, 0),
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12),
                 Opacity = 0.85
             };
 
@@ -212,7 +212,7 @@ namespace DWSIM.UI.Desktop.Editors
             {
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(8, 0, 0, 0),
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12),
                 Opacity = 0.85
             };
 
@@ -375,7 +375,7 @@ namespace DWSIM.UI.Desktop.Editors
 
             var total = new TextBlock
             {
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12),
                 Foreground = Brushes.Blue,
                 Margin = new Thickness(0, 0, 0, 4),
                 TextWrapping = TextWrapping.Wrap
@@ -463,15 +463,15 @@ namespace DWSIM.UI.Desktop.Editors
         /// <summary>The Information and Connections notebook at the top of the editor.</summary>
         private static Control BuildObjectTabs(MaterialStream ms, out Action refresh)
         {
-            var status = new TextBlock { VerticalAlignment = VerticalAlignment.Center, FontSize = 11 };
+            var status = new TextBlock { VerticalAlignment = VerticalAlignment.Center, FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12) };
             var linked = new TextBlock
             {
                 VerticalAlignment = VerticalAlignment.Center,
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12),
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
 
-            var tag = new TextBox { Text = ms.GraphicObject.Tag, FontSize = 11, MinHeight = 0 };
+            var tag = new TextBox { Text = ms.GraphicObject.Tag, FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12) };
             tag.LostFocus += (s, e) =>
             {
                 ms.GraphicObject.Tag = tag.Text;
@@ -481,7 +481,8 @@ namespace DWSIM.UI.Desktop.Editors
             var active = new CheckBox
             {
                 Content = "Active",
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12),
+                VerticalAlignment = VerticalAlignment.Center,
                 IsChecked = ms.GraphicObject.Active
             };
             active.IsCheckedChanged += (s, e) =>
@@ -499,7 +500,7 @@ namespace DWSIM.UI.Desktop.Editors
 
             AddInfoRow(info, 0, "Object", tag, active);
             AddInfoRow(info, 1, "Status", status, null);
-            AddInfoRow(info, 2, "Linked to", linked, null);
+            var linkedCaption = AddInfoRow(info, 2, "Linked to", linked, null);
 
             refresh = () =>
             {
@@ -507,7 +508,13 @@ namespace DWSIM.UI.Desktop.Editors
                     ? ms.ErrorMessage
                     : (ms.Calculated ? "Calculated" : "Not calculated");
 
-                linked.Text = Upstream(ms) + "  >  " + Downstream(ms);
+                // The logical block driving this stream, not its connections - those have their own
+                // tab, and the Windows editor's lblConnectedTo means the spec/adjust. The row is
+                // hidden outright when nothing is attached, rather than showing a placeholder.
+                linked.Text = LinkedTo(ms);
+                var isLinked = !string.IsNullOrEmpty(linked.Text);
+                linked.IsVisible = isLinked;
+                linkedCaption.IsVisible = isLinked;
 
                 if (tag.Text != ms.GraphicObject.Tag) tag.Text = ms.GraphicObject.Tag;
                 active.IsChecked = ms.GraphicObject.Active;
@@ -519,6 +526,28 @@ namespace DWSIM.UI.Desktop.Editors
             tabs.Items.Add(Tab("Information", info));
             tabs.Items.Add(Tab("Connections", BuildConnections(ms)));
             return tabs;
+        }
+
+
+        /// <summary>
+        /// The spec or adjust block attached to this object, or an empty string when there is none -
+        /// the same thing the Windows editor puts in lblConnectedTo.
+        /// </summary>
+        private static string LinkedTo(MaterialStream ms)
+        {
+            try
+            {
+                var flowsheet = ms.GetFlowsheet();
+
+                if (ms.IsSpecAttached && flowsheet.SimulationObjects.ContainsKey(ms.AttachedSpecId))
+                    return flowsheet.SimulationObjects[ms.AttachedSpecId].GraphicObject.Tag;
+
+                if (ms.IsAdjustAttached && flowsheet.SimulationObjects.ContainsKey(ms.AttachedAdjustId))
+                    return flowsheet.SimulationObjects[ms.AttachedAdjustId].GraphicObject.Tag;
+            }
+            catch (Exception) { }
+
+            return "";
         }
 
         private static string Upstream(MaterialStream ms)
@@ -537,7 +566,8 @@ namespace DWSIM.UI.Desktop.Editors
             return to == null ? "-" : to.Tag;
         }
 
-        private static void AddInfoRow(Grid host, int row, string caption, Control editor, Control trailing)
+        /// <summary>Adds a caption/editor row and returns the caption, so a caller can hide the pair.</summary>
+        private static TextBlock AddInfoRow(Grid host, int row, string caption, Control editor, Control trailing)
         {
             var label = new TextBlock
             {
@@ -554,12 +584,14 @@ namespace DWSIM.UI.Desktop.Editors
             Grid.SetColumn(editor, 1);
             host.Children.Add(editor);
 
-            if (trailing == null) return;
+            if (trailing == null) return label;
 
             trailing.Margin = new Thickness(8, 5, 0, 5);
             Grid.SetRow(trailing, row);
             Grid.SetColumn(trailing, 2);
             host.Children.Add(trailing);
+
+            return label;
         }
 
         /// <summary>Upstream and downstream of the stream, as the WinForms Connections tab lists them.</summary>
@@ -568,7 +600,7 @@ namespace DWSIM.UI.Desktop.Editors
             return new ScrollViewer { Content = AvaloniaTabBuilders.BuildConnections(ms) };
         }
 
-        /// <summary>The Property Package Settings group between the two notebooks.</summary>
+        /// <summary>The property-package row between the two notebooks.</summary>
         private static Control BuildPropertyPackageGroup(MaterialStream ms)
         {
             var flowsheet = ms.GetFlowsheet();
@@ -582,7 +614,7 @@ namespace DWSIM.UI.Desktop.Editors
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Center,
                 VerticalContentAlignment = VerticalAlignment.Center,
-                FontSize = 11
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12)
             };
             picker.SelectionChanged += (s, e) =>
             {
@@ -590,7 +622,7 @@ namespace DWSIM.UI.Desktop.Editors
                 ms.PropertyPackage = (DWSIM.Thermodynamics.PropertyPackages.PropertyPackage)packages[picker.SelectedIndex];
             };
 
-            var configure = new Button { Content = "Configure", FontSize = 11, Margin = new Thickness(6, 0, 0, 0) };
+            var configure = new Button { Content = "Configure", FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12), Margin = new Thickness(6, 0, 0, 0) };
             configure.Classes.Add("panel");
             configure.IsVisible = ConfigurePropertyPackage != null;
             configure.Click += (s, e) =>
@@ -613,16 +645,10 @@ namespace DWSIM.UI.Desktop.Editors
             row.Children.Add(configure);
             row.Children.Add(picker);
 
-            var content = new StackPanel();
-            content.Children.Add(new TextBlock
-            {
-                Text = "Property Package Settings",
-                FontWeight = FontWeight.SemiBold,
-                Margin = new Thickness(6, 4, 0, 0)
-            });
-            content.Children.Add(row);
-
-            var group = new Border { Margin = new Thickness(0, 4, 0, 4), Child = content };
+            // No heading over the row: it said "Property Package Settings" above a row that already
+            // reads "Property Package  [picker]  Configure", and on a phone that is a line of height
+            // spent restating the label beside it.
+            var group = new Border { Margin = new Thickness(0, 4, 0, 4), Child = row };
             group.Classes.Add("group");
             return group;
         }
@@ -643,7 +669,7 @@ namespace DWSIM.UI.Desktop.Editors
                 IsReadOnly = true,
                 HeadersVisibility = DataGridHeadersVisibility.None,
                 GridLinesVisibility = DataGridGridLinesVisibility.None,
-                Height = 26
+                Height = DWSIM.UI.Shared.Avalonia.UiScale.Size(26)
             };
 
             grid.Columns.Add(new DataGridTextColumn
@@ -668,7 +694,7 @@ namespace DWSIM.UI.Desktop.Editors
                 Margin = new Thickness(0, 0, 0, 4),
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Center,
-                FontSize = 11
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12)
             };
             button.Classes.Add("panel");
             button.Click += (s, e) => action();
@@ -682,7 +708,7 @@ namespace DWSIM.UI.Desktop.Editors
             {
                 ItemsSource = items.ToList(),
                 SelectedIndex = selected >= 0 && selected < items.Length ? selected : 0,
-                FontSize = 11,
+                FontSize = DWSIM.UI.Shared.Avalonia.UiScale.Font(12),
                 VerticalContentAlignment = VerticalAlignment.Center
             };
 
